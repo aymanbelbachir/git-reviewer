@@ -1,0 +1,100 @@
+# ---------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Packaging / build
+build/
+dist/
+wheels/
+sdist/
+*.egg-info/
+*.egg
+.eggs/
+pip-wheel-metadata/
+MANIFEST
+
+# Environnements virtuels
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# NB : uv.lock est volontairement versionné (dépendances épinglées).
+
+# ---------------------------------------------------------------
+# Secrets et configuration locale (ne jamais committer)
+# ---------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+.netrc
+.pypirc
+
+# ---------------------------------------------------------------
+# Caches d'outils
+# ---------------------------------------------------------------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.pytype/
+.hypothesis/
+.tox/
+.nox/
+.cache/
+
+# Couverture
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.cover
+
+# ---------------------------------------------------------------
+# Logs
+# ---------------------------------------------------------------
+*.log
+logs/
+
+# ---------------------------------------------------------------
+# Rapports générés par git-reviewer et par les outils d'analyse
+# ---------------------------------------------------------------
+reports/
+.git-reviewer/
+*-report.json
+*-report.md
+*-report.html
+*.sarif
+bandit-report.*
+gitleaks-report.*
+pip-audit-report.*
+
+# Worktrees temporaires de la sandbox
+.worktrees/
+
+# ---------------------------------------------------------------
+# Éditeurs / OS
+# ---------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---------------------------------------------------------------
+# Claude Code : réglages personnels (les skills et CLAUDE.md sont versionnés)
+# ---------------------------------------------------------------
+.claude/settings.local.json
