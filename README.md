@@ -1,5 +1,5 @@
 # git-reviewer
 
-Reviewer de code 100 % local, branché sur git, qui analyse vos diffs avec LangGraph et un modèle Ollama, et exécute les tests dans un bac à sable Docker isolé.
+A 100% local code reviewer hooked into git: it analyzes your diffs with LangGraph and an Ollama model, and runs tests in an isolated Docker sandbox.
 
-> En cours de développement. La spécification complète est dans [docs/SPEC.md](docs/SPEC.md).
+> Work in progress. The full specification is in [docs/SPEC.md](docs/SPEC.md).

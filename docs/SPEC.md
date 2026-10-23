@@ -1,129 +1,131 @@
-Je veux construire « git-reviewer » : un reviewer de code qui tourne 100 % en local, branché sur git, basé sur LangGraph et Ollama. La sécurité de l'outil lui-même est la priorité n°1 : il lit du code non fiable, exécute des tests et propose des patchs, donc chaque choix d'architecture doit être justifié du point de vue sécurité.
+> English translation of the original French specification. The French original is preserved verbatim in commit `91afdc8`.
 
-## Phase 0 : mise en place (à faire en premier)
-1. Crée un dossier git-reviewer dans le répertoire courant et initialise un dépôt git (branche main).
-2. Crée d'abord un .gitignore Python complet (.venv, .env, caches, logs, rapports générés), avant tout autre fichier.
-3. Enregistre ce prompt complet, mot pour mot, dans docs/SPEC.md. C'est la référence du projet pour toutes les sessions suivantes.
-4. Ajoute un README.md court (une phrase de description, « en cours de développement »).
-5. Fais le commit initial.
-6. Crée un dépôt GitHub PRIVÉ avec la CLI gh (gh repo create git-reviewer --private --source . --push). Si gh n'est pas installé ou pas connecté, arrête-toi et demande-moi l'URL du dépôt distant. Ne rends jamais le dépôt public.
-7. Vérifie avec claude plugin list que les plugins listés dans « Outils Claude Code » sont installés. S'il en manque, donne-moi les commandes pour que je les installe moi-même. Ne les installe pas toi-même.
-Arrête-toi et montre-moi le résultat.
+I want to build "git-reviewer": a code reviewer that runs 100% locally, hooked into git, based on LangGraph and Ollama. The security of the tool itself is the number-one priority: it reads untrusted code, runs tests and proposes patches, so every architecture choice must be justified from a security standpoint.
 
-## Ce que fait l'outil
-- Se déclenche via un hook git pre-commit, ou manuellement en CLI (git-reviewer review, git-reviewer review --range main..feature).
-- Lit le diff (staged par défaut), l'analyse avec un modèle local via Ollama et produit un rapport : bugs probables, problèmes de sécurité, lisibilité. Chaque point indique fichier, ligne, sévérité et explication.
-- Lance les tests et le linter du projet dans un bac à sable.
-- Peut proposer un patch correctif, le valider en relançant les tests, puis le montrer à l'utilisateur. Il ne l'applique qu'après confirmation explicite.
-- v1 : projets Python uniquement (pytest, ruff). Architecture extensible, mais n'implémente pas d'autres langages.
+## Phase 0: setup (do this first)
+1. Create a git-reviewer folder in the current directory and initialize a git repository (branch main).
+2. First create a complete Python .gitignore (.venv, .env, caches, logs, generated reports), before any other file.
+3. Save this complete prompt, word for word, in docs/SPEC.md. It is the project's reference for all following sessions.
+4. Add a short README.md (a one-sentence description, "work in progress").
+5. Make the initial commit.
+6. Create a PRIVATE GitHub repository with the gh CLI (gh repo create git-reviewer --private --source . --push). If gh is not installed or not logged in, stop and ask me for the remote repository URL. Never make the repository public.
+7. Check with claude plugin list that the plugins listed in "Claude Code tools" are installed. If any are missing, give me the commands so I can install them myself. Do not install them yourself.
+Stop and show me the result.
+
+## What the tool does
+- Triggered by a git pre-commit hook, or manually from the CLI (git-reviewer review, git-reviewer review --range main..feature).
+- Reads the diff (staged by default), analyzes it with a local model via Ollama and produces a report: likely bugs, security issues, readability. Each item states file, line, severity and explanation.
+- Runs the project's tests and linter in a sandbox.
+- Can propose a corrective patch, validate it by re-running the tests, then show it to the user. It applies it only after explicit confirmation.
+- v1: Python projects only (pytest, ruff). Extensible architecture, but do not implement other languages.
 
 ## Stack
-- Python 3.12+, uv pour les dépendances (lockfile commité), Typer pour la CLI, Pydantic pour tous les échanges structurés.
-- LangGraph pour l'orchestration, langchain-ollama pour le modèle. Vérifie la documentation actuelle de LangGraph avant d'écrire le graphe, l'API évolue souvent.
-- Modèle : un modèle de code récent disponible sur Ollama, configurable. Vérifie au démarrage qu'il est installé.
-- Docker pour le bac à sable d'exécution.
+- Python 3.12+, uv for dependencies (lockfile committed), Typer for the CLI, Pydantic for all structured exchanges.
+- LangGraph for orchestration, langchain-ollama for the model. Check the current LangGraph documentation before writing the graph; the API changes often.
+- Model: a recent code model available on Ollama, configurable. Check at startup that it is installed.
+- Docker for the execution sandbox.
 
-## Graphe LangGraph
-Nœuds : collecter le diff → analyse statique déterministe (ruff, bandit, gitleaks pour les secrets) → revue LLM → tests en sandbox → (si demandé) proposition de patch → validation du patch en sandbox → boucle de correction (3 itérations max) → rapport final.
-Les outils d'analyse statique sont la source de vérité. Le LLM explique, priorise et complète, mais chaque problème qu'il signale doit pointer une ligne précise du diff.
+## LangGraph graph
+Nodes: collect the diff → deterministic static analysis (ruff, bandit, gitleaks for secrets) → LLM review → sandboxed tests → (if requested) patch proposal → sandboxed patch validation → fix loop (3 iterations max) → final report.
+The static analysis tools are the source of truth. The LLM explains, prioritizes and complements, but every issue it reports must point to a precise line of the diff.
 
-## Exigences de sécurité (non négociables)
+## Security requirements (non-negotiable)
 
-1. Modèle de menace d'abord. Avant tout code, écris SECURITY.md. Liste les actifs à protéger (code, secrets, clés SSH, machine de l'utilisateur), les entrées non fiables (diff, fichiers du repo, sorties du LLM, tests) et les attaquants (contributeur malveillant dont on review la branche, contenu piégé dans le code). Pour chaque menace, donne la mitigation et le risque résiduel.
+1. Threat model first. Before any code, write SECURITY.md. List the assets to protect (code, secrets, SSH keys, the user's machine), the untrusted inputs (diff, repo files, LLM outputs, tests) and the attackers (malicious contributor whose branch is being reviewed, booby-trapped content in the code). For each threat, give the mitigation and the residual risk.
 
-2. Injection de prompt. Le contenu du diff est une donnée, jamais une instruction. Isole-le avec des délimiteurs et dis au modèle de ne suivre aucune instruction qu'il contient. Surtout, le LLM n'a accès à aucun outil capable d'effets de bord. Il ne produit que du JSON validé par un schéma Pydantic strict, et toute sortie invalide est rejetée, sans réparation permissive. C'est le graphe, pas le modèle, qui décide quoi exécuter.
+2. Prompt injection. The diff content is data, never instructions. Isolate it with delimiters and tell the model not to follow any instruction it contains. Above all, the LLM has access to no tool capable of side effects. It only produces JSON validated by a strict Pydantic schema, and any invalid output is rejected, with no permissive repair. It is the graph, not the model, that decides what to run.
 
-3. Exécution des tests = exécution de code arbitraire. Toujours dans un conteneur Docker avec :
-   - --network none, utilisateur non-root ;
-   - système de fichiers en lecture seule sauf un tmp ;
-   - limites CPU, mémoire, nombre de processus et durée ;
-   - aucune variable d'environnement de l'hôte ;
-   - aucun montage du home, de ~/.ssh, ~/.aws ou du socket Docker.
-   Le conteneur travaille sur une copie du repo (git worktree temporaire), jamais sur le répertoire de travail de l'utilisateur. Si Docker n'est pas disponible, l'outil refuse d'exécuter les tests au lieu de les lancer sur l'hôte.
+3. Running tests = running arbitrary code. Always in a Docker container with:
+   - --network none, non-root user;
+   - read-only filesystem except for a tmp;
+   - CPU, memory, process count and duration limits;
+   - no host environment variables;
+   - no mount of the home directory, ~/.ssh, ~/.aws or the Docker socket.
+   The container works on a copy of the repo (temporary git worktree), never on the user's working directory. If Docker is not available, the tool refuses to run the tests instead of running them on the host.
 
-4. Patchs. Générés et testés dans le worktree temporaire. Rejet automatique si le patch touche un fichier hors du diff, sort du repo (path traversal, liens symboliques) ou modifie .git/, les hooks, la CI, les fichiers de dépendances ou la configuration de l'outil. Affiche le diff complet et applique uniquement après confirmation explicite. Jamais de commit ni de push automatique.
+4. Patches. Generated and tested in the temporary worktree. Automatic rejection if the patch touches a file outside the diff, escapes the repo (path traversal, symbolic links) or modifies .git/, the hooks, the CI, the dependency files or the tool's configuration. Display the full diff and apply only after explicit confirmation. Never commit or push automatically.
 
-5. Commandes système. Jamais de shell=True. subprocess avec des listes d'arguments, liste blanche des binaires autorisés, chemins absolus résolus.
+5. System commands. Never shell=True. subprocess with argument lists, an allowlist of permitted binaries, resolved absolute paths.
 
-6. Réseau et confidentialité. Aucun appel réseau sauf vers Ollama. Au démarrage, vérifie que l'URL d'Ollama est une adresse locale et avertis si Ollama écoute sur 0.0.0.0. Désactive explicitement tout tracing ou télémétrie LangChain/LangSmith. Les logs ne contiennent ni le code ni les secrets détectés (masqués).
+6. Network and privacy. No network calls except to Ollama. At startup, check that the Ollama URL is a local address and warn if Ollama listens on 0.0.0.0. Explicitly disable all LangChain/LangSmith tracing or telemetry. Logs contain neither the code nor the detected secrets (masked).
 
-7. Hook git. L'installation n'écrase jamais un hook existant (chaînage ou refus). Le script du hook est minimal et lisible. Mode configurable : bloquant ou simple avertissement. Documente --no-verify.
+7. Git hook. Installation never overwrites an existing hook (chaining or refusal). The hook script is minimal and readable. Configurable mode: blocking or warning only. Document --no-verify.
 
-8. Chaîne d'approvisionnement. Dépendances minimales, épinglées avec hashes. pip-audit et bandit sur le code de l'outil lui-même dans la CI.
+8. Supply chain. Minimal dependencies, pinned with hashes. pip-audit and bandit on the tool's own code in CI.
 
-9. Tests de sécurité. Crée une suite dédiée avec des fixtures malveillantes :
-   - diff contenant une injection de prompt dans un commentaire ;
-   - patch avec path traversal ;
-   - test qui tente un accès réseau ;
-   - test qui lit ~/.ssh ;
-   - boucle infinie et fork bomb ;
-   - symlink vers l'extérieur du repo.
-   Chaque test doit prouver que l'attaque échoue.
+9. Security tests. Create a dedicated suite with malicious fixtures:
+   - diff containing a prompt injection in a comment;
+   - patch with path traversal;
+   - test that attempts network access;
+   - test that reads ~/.ssh;
+   - infinite loop and fork bomb;
+   - symlink pointing outside the repo.
+   Each test must prove that the attack fails.
 
-## Agents gardiens (défense en profondeur)
+## Guardian agents (defense in depth)
 
-Ajoute trois agents gardiens dans le graphe LangGraph. Ils complètent les contrôles déterministes, ils ne les remplacent jamais.
+Add three guardian agents to the LangGraph graph. They complement the deterministic checks; they never replace them.
 
-Règles communes à tous les gardiens :
-- Un gardien peut bloquer ou lever une alerte, jamais autoriser. Son avis ne peut pas annuler un blocage déterministe.
-- Fail-closed : erreur, timeout ou sortie JSON invalide = blocage.
-- Isolation : chaque gardien a son propre prompt système, aucun accès aux outils, aucun accès à l'historique du reviewer, et une sortie Pydantic stricte du type {verdict: "ok" | "suspect" | "bloquer", raisons: [...], lignes: [...]}. Le modèle des gardiens est configurable séparément de celui du reviewer.
-- Chaque décision de gardien est journalisée (sans le code ni les secrets) dans un rapport de sécurité affiché à l'utilisateur.
+Rules common to all guardians:
+- A guardian can block or raise an alert, never authorize. Its opinion cannot override a deterministic block.
+- Fail-closed: error, timeout or invalid JSON output = block.
+- Isolation: each guardian has its own system prompt, no access to tools, no access to the reviewer's history, and a strict Pydantic output of the form {verdict: "ok" | "suspect" | "block", reasons: [...], lines: [...]}. The guardians' model is configurable separately from the reviewer's.
+- Every guardian decision is logged (without the code or secrets) in a security report shown to the user.
 
-1. Gardien anti-injection (avant et après la revue LLM)
-   Avant :
-   - Barrière déterministe : détecte les caractères Unicode invisibles ou bidirectionnels (attaques type Trojan Source), les longues chaînes encodées (base64, hex) et les phrases qui s'adressent à une IA (« ignore tes instructions », « tu es maintenant »…).
-   - Agent : classe les passages suspects et renvoie les lignes concernées.
-   Après :
-   - Place un jeton canari secret dans le prompt système du reviewer. S'il apparaît dans la sortie, c'est une injection : blocage.
-   - Recoupe avec l'analyse statique. Si ruff, bandit ou gitleaks signalent un problème que le reviewer ignore ou minimise, lève une alerte d'injection probable.
+1. Anti-injection guardian (before and after the LLM review)
+   Before:
+   - Deterministic barrier: detects invisible or bidirectional Unicode characters (Trojan Source-style attacks), long encoded strings (base64, hex) and phrases addressed to an AI ("ignore your instructions", "you are now"…).
+   - Agent: classifies the suspicious passages and returns the affected lines.
+   After:
+   - Place a secret canary token in the reviewer's system prompt. If it appears in the output, it is an injection: block.
+   - Cross-check with the static analysis. If ruff, bandit or gitleaks report an issue that the reviewer ignores or downplays, raise a probable-injection alert.
 
-2. Gardien d'exécution (avant et après les tests en sandbox)
-   Avant :
-   - Barrière déterministe : vérifie par assertions la commande Docker réellement construite (--network none, non-root, lecture seule, limites, aucun montage interdit, aucune variable d'environnement de l'hôte). Si un seul paramètre dévie, pas d'exécution.
-   - Agent : lit les tests, conftest.py, setup.py, pyproject.toml et fixtures du diff, et signale le code suspect (accès réseau, sous-processus, lecture de fichiers hors du repo, variables d'environnement, eval/exec, code obfuscé).
-   Après :
-   - Vérifie par empreinte (hash) que le répertoire de travail de l'utilisateur n'a pas été modifié pendant l'exécution, et que le conteneur est bien arrêté et supprimé.
+2. Execution guardian (before and after the sandboxed tests)
+   Before:
+   - Deterministic barrier: verifies by assertions the Docker command actually built (--network none, non-root, read-only, limits, no forbidden mount, no host environment variables). If a single parameter deviates, no execution.
+   - Agent: reads the tests, conftest.py, setup.py, pyproject.toml and fixtures in the diff, and flags suspicious code (network access, subprocesses, reading files outside the repo, environment variables, eval/exec, obfuscated code).
+   After:
+   - Verifies by fingerprint (hash) that the user's working directory was not modified during execution, and that the container is indeed stopped and removed.
 
-3. Auditeur de patch (avant de montrer le patch à l'utilisateur)
-   - Il est distinct de l'agent qui écrit le patch et ne voit que le problème signalé et le patch, pas le raisonnement de l'auteur.
-   - Il vérifie que le patch corrige uniquement le problème annoncé, et qu'il n'ajoute ni appel réseau, ni dépendance, ni code obfuscé, ni import inattendu.
-   - Il vérifie qu'il n'affaiblit pas les tests : assert supprimés, tests marqués skip ou xfail, seuils assouplis, try/except qui avale les erreurs.
-   - Les règles de chemins déterministes s'appliquent avant lui et ont le dernier mot.
+3. Patch auditor (before showing the patch to the user)
+   - It is separate from the agent that writes the patch and sees only the reported issue and the patch, not the author's reasoning.
+   - It checks that the patch fixes only the announced issue, and that it adds no network call, no dependency, no obfuscated code and no unexpected import.
+   - It checks that the patch does not weaken the tests: removed asserts, tests marked skip or xfail, relaxed thresholds, try/except that swallows errors.
+   - The deterministic path rules apply before it and have the final say.
 
-Tests des gardiens : crée un jeu de diffs malveillants (au moins 20 variantes par gardien) et mesure le taux de détection de chaque gardien séparément, ainsi que le taux de faux positifs sur des diffs sains. Ajoute ces chiffres et les cas non détectés dans SECURITY.md.
+Guardian tests: create a set of malicious diffs (at least 20 variants per guardian) and measure each guardian's detection rate separately, as well as the false-positive rate on clean diffs. Add these figures and the undetected cases to SECURITY.md.
 
-## Outils Claude Code à utiliser
+## Claude Code tools to use
 
-Plugins (installés par moi, vérifiés en phase 0) :
-- security-guidance : relit chaque changement que tu fais pour chercher des vulnérabilités. En phase 1, crée .claude/claude-security-guidance.md avec un résumé du modèle de menace de SECURITY.md pour qu'il l'applique. Il ne relit pas les commits que je fais moi-même, donc ne compte pas sur lui pour ça.
-- pyright-lsp : utilise-le pour vérifier les types et les références après chaque modification.
-- pr-review-toolkit : utilise ses agents de revue à la fin de chaque phase.
-- skill-creator : utilise-le pour tester les skills du projet décrites ci-dessous.
-N'installe aucun plugin tiers sans me demander.
+Plugins (installed by me, checked in phase 0):
+- security-guidance: reviews every change you make, looking for vulnerabilities. In phase 1, create .claude/claude-security-guidance.md with a summary of the SECURITY.md threat model so that it applies it. It does not review the commits I make myself, so do not rely on it for that.
+- pyright-lsp: use it to check types and references after every change.
+- pr-review-toolkit: use its review agents at the end of each phase.
+- skill-creator: use it to test the project skills described below.
+Do not install any third-party plugin without asking me.
 
-Commandes intégrées : lance /code-review et /security-review à la fin de chaque phase, avant de me demander de valider.
+Built-in commands: run /code-review and /security-review at the end of each phase, before asking me to validate.
 
-Skills du projet à créer en phase 1 dans .claude/skills/ :
-- verify : lance pytest (tests unitaires + suite de sécurité), ruff, bandit sur le code de l'outil et pip-audit. Elle doit s'appeler exactement verify et ne pas avoir disable-model-invocation, pour que Claude Code la lance automatiquement avant chaque commit.
-- security-gate : checklist des 9 exigences de sécurité et des règles des gardiens. Pour chaque point, OK ou KO avec fichier et ligne en preuve. Frontmatter : context: fork (sous-agent isolé, pas l'agent qui a écrit le code) et disable-model-invocation: true (c'est moi qui la lance).
-- red-team : génère de nouvelles variantes de diffs malveillants, les ajoute aux fixtures, fait tourner les gardiens et met à jour les taux de détection dans SECURITY.md. Frontmatter : disable-model-invocation: true.
+Project skills to create in phase 1 in .claude/skills/:
+- verify: runs pytest (unit tests + security suite), ruff, bandit on the tool's code, and pip-audit. It must be named exactly verify and must not have disable-model-invocation, so that Claude Code runs it automatically before each commit.
+- security-gate: checklist of the 9 security requirements and the guardian rules. For each item, OK or KO with file and line as evidence. Frontmatter: context: fork (isolated sub-agent, not the agent that wrote the code) and disable-model-invocation: true (I am the one who runs it).
+- red-team: generates new variants of malicious diffs, adds them to the fixtures, runs the guardians and updates the detection rates in SECURITY.md. Frontmatter: disable-model-invocation: true.
 
 ## Git
-- Commit et push à la fin de chaque phase, uniquement après ma validation.
-- Avant chaque commit, vérifie git status et le diff : aucun secret, aucun fichier généré.
-- Messages de commit clairs (feat:, fix:, chore:, test:, docs:).
-- Jamais de force push, jamais de réécriture de l'historique déjà poussé.
+- Commit and push at the end of each phase, only after my approval.
+- Before each commit, check git status and the diff: no secrets, no generated files.
+- Clear commit messages (feat:, fix:, chore:, test:, docs:).
+- Never force push, never rewrite history that has already been pushed.
 
-## Méthode de travail
-Arrête-toi à la fin de chaque phase pour que je valide :
-0. Mise en place (ci-dessus).
-1. Plan d'architecture, SECURITY.md, .claude/claude-security-guidance.md, les trois skills du projet, et un CLAUDE.md court qui importe la spec avec @docs/SPEC.md et rappelle les règles de sécurité et git. Aucun code de l'outil. Commit + push, puis dis-moi de redémarrer Claude Code dans le dossier git-reviewer pour que les skills et CLAUDE.md soient chargés.
-2. Squelette CLI, lecture du diff, vérification d'Ollama.
-3. Graphe de revue sans exécution (analyse statique + LLM + rapport) + gardien anti-injection.
-4. Sandbox Docker et exécution des tests + gardien d'exécution.
-5. Proposition et validation de patchs + auditeur de patch.
-6. Installation du hook git.
-7. Suite de tests de sécurité, /red-team, /security-gate et audit final : relis tout le code en cherchant activement des failles, puis mets à jour SECURITY.md avec les taux de détection et les risques résiduels.
+## Working method
+Stop at the end of each phase so that I can validate:
+0. Setup (above).
+1. Architecture plan, SECURITY.md, .claude/claude-security-guidance.md, the three project skills, and a short CLAUDE.md that imports the spec with @docs/SPEC.md and restates the security and git rules. No tool code. Commit + push, then tell me to restart Claude Code in the git-reviewer folder so that the skills and CLAUDE.md are loaded.
+2. CLI skeleton, diff reading, Ollama check.
+3. Review graph without execution (static analysis + LLM + report) + anti-injection guardian.
+4. Docker sandbox and test execution + execution guardian.
+5. Patch proposal and validation + patch auditor.
+6. Git hook installation.
+7. Security test suite, /red-team, /security-gate and final audit: reread all the code actively looking for flaws, then update SECURITY.md with the detection rates and residual risks.
 
-Écris des tests à chaque phase. Si une exigence de sécurité entre en conflit avec une fonctionnalité, choisis la sécurité et explique-moi le compromis.
+Write tests in every phase. If a security requirement conflicts with a feature, choose security and explain the trade-off to me.
