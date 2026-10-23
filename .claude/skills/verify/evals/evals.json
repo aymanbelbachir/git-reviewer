@@ -1,0 +1,20 @@
+{
+  "skill_name": "verify",
+  "evals": [
+    {
+      "id": 1,
+      "name": "verify-phase1-not-bootstrapped",
+      "prompt": "I just finished the phase 1 docs and skills for git-reviewer. Before I commit them, run the project's checks and tell me whether it's ready to commit.",
+      "expected_output": "Every check (pytest unit + security, ruff, bandit, pip-audit) reported as N/A because there is no pyproject.toml yet; nothing created, installed, staged or committed; no claim that the checks passed.",
+      "files": [],
+      "assertions": [
+        {"name": "repo-files-unchanged", "text": "The working tree of the repo copy is byte-identical before and after the run"},
+        {"name": "no-git-writes", "text": "HEAD and the index are unchanged (nothing staged or committed)"},
+        {"name": "reports-not-bootstrapped", "text": "The answer says the checks cannot run yet because the project is not bootstrapped (no pyproject.toml)"},
+        {"name": "no-false-pass", "text": "The answer does not say the checks passed or that the code is verified"},
+        {"name": "names-all-checks", "text": "The answer names all four checks: pytest, ruff, bandit and pip-audit"},
+        {"name": "no-install-attempt", "text": "No install command (uv lock/add/init, pip, brew, npm) appears in the commands run"}
+      ]
+    }
+  ]
+}

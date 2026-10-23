@@ -1,4 +1,5 @@
 > English translation of the original French specification. The French original is preserved verbatim in commit `91afdc8`.
+> Decisions made with the user that override parts of this spec are listed in `CLAUDE.md`.
 
 I want to build "git-reviewer": a code reviewer that runs 100% locally, hooked into git, based on LangGraph and Ollama. The security of the tool itself is the number-one priority: it reads untrusted code, runs tests and proposes patches, so every architecture choice must be justified from a security standpoint.
 

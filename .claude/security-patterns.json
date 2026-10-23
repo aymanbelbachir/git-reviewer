@@ -1,0 +1,46 @@
+{
+  "patterns": [
+    {
+      "rule_name": "docker_dangerous_flag",
+      "regex": "--privileged|--cap-add|--device|--volumes-from|--volume|--mount|[\\s\"'\\[,]-v[\\s\"',]|--(network|net)[= ](?!none)|--(pid|ipc|uts|userns|cgroupns)[= ]host|docker\\.sock|--env-file|unconfined",
+      "exclude_paths": ["*tests/security/fixtures/*", "*tests/guardians/datasets/*", "*.md", "*security-patterns.json"],
+      "reminder": "git-reviewer sandbox rule: containers run with --network=none, non-root, read-only, all capabilities dropped and no mounts except the read-only temp worktree. This flag weakens the sandbox (SECURITY.md T-09 to T-11)."
+    },
+    {
+      "rule_name": "host_env_passthrough",
+      "regex": "env\\s*=\\s*(dict\\()?os\\.environ|os\\.environ\\.copy\\(\\)|\\*\\*os\\.environ",
+      "exclude_paths": ["*tests/security/fixtures/*", "*tests/guardians/datasets/*", "*.md", "*security-patterns.json"],
+      "reminder": "git-reviewer rule: child processes get a minimal explicit environment built in proc.py, never the user's environment (SECURITY.md T-11, T-22)."
+    },
+    {
+      "rule_name": "copytree_follows_symlinks",
+      "regex": "copytree\\(",
+      "exclude_paths": ["*tests/security/fixtures/*", "*tests/guardians/datasets/*", "*.md", "*security-patterns.json"],
+      "reminder": "shutil.copytree follows symlinks by default and can copy files from outside the repository (e.g. ~/.ssh). Pass symlinks=True and validate link targets (SECURITY.md T-18)."
+    },
+    {
+      "rule_name": "langchain_tracing",
+      "regex": "LANGCHAIN_TRACING|LANGSMITH_",
+      "exclude_paths": ["*tests/security/fixtures/*", "*tests/guardians/datasets/*", "*.md", "*security-patterns.json", "*src/git_reviewer/__init__.py"],
+      "reminder": "git-reviewer rule: LangChain/LangSmith tracing must be forced off before any LangChain import and never enabled (SECURITY.md T-25)."
+    },
+    {
+      "rule_name": "lenient_llm_parsing",
+      "regex": "json_repair|partial_json|strict\\s*=\\s*False|extra\\s*=\\s*[\"'](allow|ignore)",
+      "exclude_paths": ["*tests/security/fixtures/*", "*tests/guardians/datasets/*", "*.md", "*security-patterns.json"],
+      "reminder": "git-reviewer rule: model output is validated with strict Pydantic (strict=True, extra='forbid') and rejected if invalid, never repaired (SECURITY.md T-04)."
+    },
+    {
+      "rule_name": "git_write_operation",
+      "regex": "[\"'](add|commit|push)[\"']|--unsafe-paths",
+      "paths": ["*src/*"],
+      "reminder": "git-reviewer rule: the tool never commits or pushes, and never uses git apply --unsafe-paths (SECURITY.md T-18, T-20)."
+    },
+    {
+      "rule_name": "bind_all_interfaces",
+      "substrings": ["0.0.0.0"],
+      "exclude_paths": ["*tests/security/fixtures/*", "*tests/guardians/datasets/*", "*.md", "*security-patterns.json"],
+      "reminder": "git-reviewer only talks to a loopback Ollama. 0.0.0.0 may only appear in the check that warns when Ollama listens on all interfaces (SECURITY.md T-24)."
+    }
+  ]
+}

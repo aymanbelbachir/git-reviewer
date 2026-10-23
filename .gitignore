@@ -20,9 +20,6 @@ MANIFEST
 # Virtual environments
 .venv/
 venv/
-env/
-ENV/
-.python-version
 
 # Note: uv.lock is intentionally tracked (pinned dependencies).
 
@@ -98,3 +95,5 @@ Thumbs.db
 # Claude Code: personal settings (skills and CLAUDE.md are tracked)
 # ---------------------------------------------------------------
 .claude/settings.local.json
+.claude/claude-security-guidance.local.md
+.claude/security-patterns.local.*

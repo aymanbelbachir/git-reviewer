@@ -1,0 +1,19 @@
+{
+  "skill_name": "security-gate",
+  "evals": [
+    {
+      "id": 1,
+      "name": "security-gate-phase1-audit",
+      "prompt": "Run the security gate on git-reviewer and give me the OK/KO table for every security requirement and guardian rule, with file:line evidence.",
+      "expected_output": "A table covering R1-R9 and G0-G4. Only the threat-model items can be OK (SECURITY.md exists); every item that needs code is PENDING with its phase, because no tool code exists yet. Nothing is modified.",
+      "files": [],
+      "assertions": [
+        {"name": "repo-files-unchanged", "text": "The working tree of the repo copy is byte-identical before and after the run"},
+        {"name": "no-code-item-marked-ok", "text": "No item outside R1 (threat model) is marked OK, since there is no tool code to cite"},
+        {"name": "pending-items-carry-phase", "text": "Items without code are reported as PENDING (or KO) with the phase that delivers them, not as OK or N/A"},
+        {"name": "covers-guardian-rules", "text": "The table covers the guardian rules (common rules, anti-injection, execution, patch auditor) in addition to the 9 requirements"},
+        {"name": "has-summary-and-verdict", "text": "The output has a summary count line and an explicit verdict section"}
+      ]
+    }
+  ]
+}
