@@ -1,0 +1,9 @@
+{
+  "enabledPlugins": {
+    "security-guidance@claude-plugins-official": true,
+    "pyright-lsp@claude-plugins-official": true,
+    "pr-review-toolkit@claude-plugins-official": true,
+    "skill-creator@claude-plugins-official": true,
+    "mattpocock-skills@claude-plugins-official": true
+  }
+}
