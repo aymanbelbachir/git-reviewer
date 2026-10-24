@@ -33,7 +33,7 @@ Run everything from the repository root.
    `tests/unit/` and `tests/security/`. Any skipped test under `tests/security/` makes the security row
    FAIL, with the skip reason (usually Docker unavailable): an attack test that did not run proves nothing.
 4. **Lint and format:** `uv run --locked ruff check .` then `uv run --locked ruff format --check .`
-5. **Bandit on the tool's code:** `uv run --locked bandit -r src`. Then list every `nosec` in `src/`
+5. **Bandit on the tool's code:** `uv run --locked bandit -c pyproject.toml -r src`. Then list every `nosec` in `src/`
    (`grep -rn "nosec" src`) so the user can review each one; a `nosec` without an explanatory comment is a FAIL.
 6. **Dependency audit:** `uv run --locked pip-audit --skip-editable`. Any known vulnerability is a FAIL.
 
@@ -47,7 +47,7 @@ Use this template:
 | Unit tests       | uv run --locked pytest -ra           | PASS/FAIL/N/A  | passed/failed/skipped, first failures |
 | Security tests   | (same run, tests/security/)          | PASS/FAIL/N/A  | skipped tests with reasons      |
 | Ruff             | ruff check . / ruff format --check . | PASS/FAIL/N/A  | rule codes and locations        |
-| Bandit           | bandit -r src                        | PASS/FAIL/N/A  | issues by severity, nosec list  |
+| Bandit           | bandit -c pyproject.toml -r src      | PASS/FAIL/N/A  | issues by severity, nosec list  |
 | pip-audit        | pip-audit --skip-editable            | PASS/FAIL/N/A  | package, version, advisory id   |
 
 Overall: PASS | FAIL | N/A

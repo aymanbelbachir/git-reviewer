@@ -1,0 +1,36 @@
+# CI for git-reviewer's own code (docs/SPEC.md, security requirement 8).
+# Actions are pinned by commit SHA; the workflow token is read-only and never persisted.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.5"
+          enable-cache: false
+      - name: Install locked dependencies (hashes from uv.lock)
+        run: uv sync --locked
+      - name: Lint
+        run: uv run --locked ruff check .
+      - name: Format
+        run: uv run --locked ruff format --check .
+      - name: Tests (unit + security)
+        run: uv run --locked pytest -ra
+      - name: Bandit on the tool's code
+        run: uv run --locked bandit -c pyproject.toml -r src
+      - name: Dependency audit
+        run: uv run --locked pip-audit --skip-editable

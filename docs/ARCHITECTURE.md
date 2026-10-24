@@ -174,9 +174,15 @@ Design rules:
   request. Any other form (`A...B`, a single ref) is a usage error.
 - Refs from `--range` are validated with `git rev-parse --verify --end-of-options <ref>^{commit}`
   and then used as object IDs only (T-21).
+- Diffs also pass `--no-relative --ignore-submodules=none --submodule=short` and
+  `-c diff.suppressBlankEmpty=false`, so neither a branch's `.gitmodules` (`ignore = all`) nor local
+  config can hide a change or shift line numbers; every hunk's line counts are checked against its
+  header, and a mismatch stops the review.
 - Every git call on untrusted content uses `--no-ext-diff --no-textconv --no-color` (plus
   `--binary` for the staged diff that is replayed in the worktree, §8.1),
-  `-c core.hooksPath=/dev/null -c core.fsmonitor=false`, and an environment with
+  `-c core.hooksPath=/dev/null -c core.fsmonitor=false`, `--attr-source=<empty tree>` (a
+  branch's `.gitattributes` with `* -diff` or `binary` would otherwise make git print "Binary
+  files differ" instead of the code; needs git 2.40+, checked by `doctor`), and an environment with
   `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_TERMINAL_PROMPT=0` and
   `GIT_OPTIONAL_LOCKS=0` (read-only commands must not rewrite `.git/index`, which the execution
   guardian fingerprints) (T-23).
@@ -186,6 +192,10 @@ Design rules:
   wrong index and miss what is actually committed.
 - Hard limits (configurable downward only): diff size, number of files, line length. Over a limit
   the review stops with status "not reviewed" (exit 2 in block mode); it never truncates silently (T-35).
+- Failure classes: resource limits (size, timeout) give "not reviewed" and follow `--mode`;
+  unsafe paths and patch/file-list mismatches always exit 2, even in warn mode; unmerged paths
+  exit 3; any other git failure exits 4 with git's own (sanitized) message. An unexpected crash
+  exits 2, never 0 or 1. Until the LLM review exists (phase 3), `review` reports "not reviewed".
 - Binary files are listed as "not analyzed" (T-36). Paths are checked for NUL, control characters,
   absolute paths and `..` before use.
 - `DiffIndex` maps each file to the set of added or modified line numbers; every finding is checked

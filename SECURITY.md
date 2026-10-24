@@ -112,7 +112,7 @@ partly unmitigated), **High** (expected to happen), **Accepted** (known, documen
 | T-28 | Hook installation overwrites an existing hook; the hook is bypassed, or reviews the wrong content (`git commit -a` uses a temporary index) | Never overwrite: refuse or chain (`--chain`), restore on uninstall; minimal readable script with an absolute path; `GIT_INDEX_FILE` passed through so the review sees exactly what is committed; `--no-verify` documented | Accepted: the hook is a convenience, not a security boundary |
 | T-33 | Temp files exposed to other local users, or temp path races | `mkdtemp` (mode 0700), random names, cleanup in `finally` | Low |
 | T-35 | An oversized diff is truncated and the payload hides past the cut | Hard limits; over a limit the status is "not reviewed" (blocks in block mode); never truncated silently | Low |
-| T-36 | Payload hidden in binary or unanalyzable files | Listed as "not analyzed" in the report and flagged in block mode | **Medium** |
+| T-36 | Payload hidden in binary or unanalyzable files, including files a `.gitattributes` marks `-diff` or `binary` | git reads attributes from the empty tree, so the repository cannot turn its own code into "binary"; genuinely binary files are listed as "not analyzed" and flagged in block mode | **Medium** |
 
 ### 5.5 Confidentiality and network
 

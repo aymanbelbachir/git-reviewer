@@ -1,0 +1,61 @@
+[project]
+name = "git-reviewer"
+version = "0.1.0"
+description = "A 100% local, security-first code reviewer for git, built on LangGraph and Ollama."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "pydantic>=2.14.1",
+    "typer>=0.27.3",
+]
+
+[project.scripts]
+git-reviewer = "git_reviewer.cli:main"
+
+[tool.uv]
+# Use a uv-managed CPython, never the user's conda or system interpreter.
+python-preference = "only-managed"
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "bandit>=1.9.4",
+    "pip-audit>=2.10.1",
+    "pytest>=9.1.1",
+    "ruff>=0.17.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Malicious samples live in these directories. They are data and must never be collected (T-32).
+norecursedirs = ["fixtures", "datasets"]
+pythonpath = ["."]
+addopts = ["-p", "no:cacheprovider", "--strict-markers", "--import-mode=importlib"]
+markers = ["docker: needs a local Docker daemon (sandbox tests)"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["tests/security/fixtures", "tests/guardians/datasets"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "SIM", "RUF", "PTH"]
+
+[tool.ruff.lint.per-file-ignores]
+# S103/S104: tests deliberately create permissive files and probe the 0.0.0.0 check.
+"tests/**" = ["S101", "S103", "S104", "S108"]
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+
+[tool.pyright]
+include = ["src", "tests"]
+exclude = ["tests/security/fixtures", "tests/guardians/datasets"]
+pythonVersion = "3.12"
+extraPaths = ["src"]
+venvPath = "."
+venv = ".venv"
