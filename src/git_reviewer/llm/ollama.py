@@ -26,7 +26,8 @@ from git_reviewer import proc
 
 DEFAULT_PORT = 11434
 _MAX_RESPONSE_BYTES = 1024 * 1024
-_ALL_INTERFACES = frozenset({"0.0.0.0", "::", "*"})  # noqa: S104 - compared against, never bound
+# Addresses meaning "every interface". Only compared against listener addresses, never bound.
+_ALL_INTERFACES = frozenset({"0.0.0.0", "::", "*"})  # noqa: S104  # nosec B104
 
 
 class OllamaError(RuntimeError):

@@ -17,7 +17,9 @@ import os
 import selectors
 import signal
 import stat
-import subprocess  # nosec B404 - this module is the single, audited subprocess entry point
+
+# This module is the single, audited subprocess entry point.
+import subprocess  # nosec B404
 import sys
 import time
 from collections.abc import Mapping, Sequence
@@ -133,7 +135,8 @@ def run(
     executable = resolve_binary(binary, forbidden_root=forbidden_root)
     argv = [str(executable), *_checked_args(args)]
     env = _build_env(env_extra)
-    process = subprocess.Popen(  # noqa: S603  # nosec B603 - argv list, allowlisted absolute binary, no shell
+    # argv list, allowlisted absolute binary, no shell.
+    process = subprocess.Popen(  # noqa: S603  # nosec B603
         argv,
         cwd=cwd,
         env=env,
