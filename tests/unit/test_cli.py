@@ -276,3 +276,31 @@ def test_missing_model_message_does_not_say_start_ollama(
     assert result.exit_code == cli.EXIT_ENVIRONMENT
     assert "ollama pull m" in result.output
     assert "start Ollama" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (proc.BinaryNotFoundError("gitleaks not found in trusted directories"), "install it"),
+        (
+            proc.UnsafeBinaryError("/usr/local/bin is writable by group or others"),
+            "another user could replace gitleaks",
+        ),
+    ],
+)
+def test_gitleaks_problems_are_environment_errors(
+    staged_repo: Path, monkeypatch: pytest.MonkeyPatch, error: proc.ProcError, expected: str
+) -> None:
+    real_resolve = proc.resolve_binary
+
+    def resolve(name: str, **kwargs: object) -> Path:
+        if name == "gitleaks":
+            raise error
+        return real_resolve(name, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(proc, "resolve_binary", resolve)
+    result = runner.invoke(cli.app, ["review"])
+    assert result.exit_code == cli.EXIT_ENVIRONMENT
+    assert expected in result.output
+    if isinstance(error, proc.UnsafeBinaryError):
+        assert "install it, e.g." not in result.output

@@ -246,8 +246,16 @@ def _require_ollama(settings: Settings) -> tuple[ChatFn, ChatFn]:
 def _require_binary(name: str, hint: str) -> None:
     try:
         proc.resolve_binary(name)
-    except proc.ProcError as exc:
+    except proc.BinaryNotFoundError as exc:
         _fail(EXIT_ENVIRONMENT, f"{exc} ({hint})")
+    except proc.UnsafeBinaryError as exc:
+        _fail(
+            EXIT_ENVIRONMENT,
+            f"{exc}: another user could replace {name}, so it is not run "
+            f"(remove that write permission, or install {name} in a directory only you can write)",
+        )
+    except proc.ProcError as exc:
+        _fail(EXIT_ENVIRONMENT, str(exc))
 
 
 def _not_reviewed(reason: str, mode: Mode, output_format: OutputFormat) -> NoReturn:

@@ -31,7 +31,9 @@ jobs:
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
           echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
-          sudo install -m 0755 "$RUNNER_TEMP/gitleaks" /usr/local/bin/gitleaks
+          # Not /usr/local/bin: it is group-writable on GitHub's Ubuntu runners, and git-reviewer
+          # refuses binaries in a directory that other users can write (T-22).
+          sudo install -m 0755 "$RUNNER_TEMP/gitleaks" /usr/bin/gitleaks
           gitleaks version
       - name: Install locked dependencies (hashes from uv.lock)
         run: uv sync --locked
