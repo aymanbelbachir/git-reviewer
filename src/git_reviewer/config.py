@@ -19,6 +19,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 ENV_PREFIX = "GIT_REVIEWER_"
 _MODEL_NAME = r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$"
+# A local image: name[:tag], or the image ID itself. Never an option (no leading "-").
+_IMAGE_REF = r"^([a-z0-9][a-z0-9._/-]{0,199}(:[A-Za-z0-9._-]{1,128})?|sha256:[0-9a-f]{64})$"
 
 Severity = Literal["info", "low", "medium", "high", "critical"]
 
@@ -44,6 +46,9 @@ class Settings(BaseModel):
     # At least twice the 4096 tokens reserved for the model's answer.
     model_context_tokens: int = Field(default=32_768, ge=8_192, le=131_072)
     severity_threshold: Severity = "high"
+    # The sandbox image the user built (docs/ARCHITECTURE.md §8.2); never built or pulled by us.
+    sandbox_image: str = Field(default="git-reviewer-sandbox:0.1", pattern=_IMAGE_REF)
+    sandbox_timeout_seconds: int = Field(default=300, ge=10, le=1_800)
 
 
 def config_path(environ: Mapping[str, str] = os.environ) -> Path:

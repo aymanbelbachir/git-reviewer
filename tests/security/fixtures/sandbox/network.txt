@@ -1,0 +1,21 @@
+import socket
+
+import pytest
+
+
+def test_network_access():
+    reached = []
+    for target in [("1.1.1.1", 53), ("8.8.8.8", 443)]:
+        try:
+            socket.create_connection(target, timeout=3).close()
+            reached.append(f"{target[0]}:{target[1]}")
+        except OSError:
+            pass
+    try:
+        socket.getaddrinfo("example.com", 443)
+        reached.append("dns")
+    except OSError:
+        pass
+    if reached:
+        pytest.fail("SANDBOX-ESCAPE: network " + ", ".join(reached))
+    pytest.fail("ATTACK-BLOCKED: no network")

@@ -1,0 +1,3 @@
+def test_never_ends():
+    while True:
+        pass

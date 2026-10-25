@@ -7,6 +7,7 @@ over a limit the diff is "not reviewed", it is never truncated.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -95,15 +96,35 @@ class DiffParseError(DiffError):
     """The patch does not match git's own file list."""
 
 
+class IndexChangedError(DiffError):
+    """The staged changes changed while they were being reviewed."""
+
+
 class UnmergedPathsError(DiffError):
     """The index has unresolved merge conflicts."""
 
 
 def collect_staged(repo: Path, limits: DiffLimits, *, hook: bool = False) -> Diff:
     """The staged changes, what `git commit` would record (the hook's index in hook mode)."""
+    before = index_digest(staged_index(repo, hook=hook))
     statuses = _name_status(repo, ["--cached"], hook=hook)
     patch = _patch(repo, ["--cached"], limits, hook=hook)
-    return _build("staged", None, None, statuses, patch, limits)
+    if index_digest(staged_index(repo, hook=hook)) != before:
+        raise IndexChangedError("the staged changes changed while they were read; review again")
+    diff = _build("staged", None, None, statuses, patch, limits)
+    return diff.model_copy(update={"index_digest": before})
+
+
+def staged_index(repo: Path, *, hook: bool = False) -> bytes:
+    """`git ls-files --stage -z`: every index entry with its mode and object id."""
+    result = run_git(repo, ["ls-files", "--stage", "-z"], hook=hook)
+    if result.returncode != 0:
+        raise DiffError(f"git ls-files failed: {stderr_text(result)}")
+    return result.stdout
+
+
+def index_digest(listing: bytes) -> str:
+    return hashlib.sha256(listing).hexdigest()
 
 
 def collect_range(repo: Path, spec: str, limits: DiffLimits) -> Diff:
@@ -136,7 +157,7 @@ def _name_status(repo: Path, revs: list[str], *, hook: bool = False) -> dict[str
             raise UnmergedPathsError("resolve merge conflicts before reviewing")
         if letter not in _STATUS:
             raise DiffParseError(f"unexpected file status {letter!r}")
-        path = _decode_path(raw_path)
+        path = decode_path(raw_path)
         statuses[path] = _STATUS[letter]
     return statuses
 
@@ -316,7 +337,7 @@ def _header_path(value: str, prefix: str) -> str | None:
     raw = _unquote(value) if value.startswith('"') else value.removesuffix("\t").encode("utf-8")
     if not raw.startswith(prefix.encode()):
         raise DiffParseError("unexpected path prefix in patch header")
-    return _decode_path(raw[len(prefix) :])
+    return decode_path(raw[len(prefix) :])
 
 
 def _path_from_git_header(header: str) -> str:
@@ -333,7 +354,7 @@ def _path_from_git_header(header: str) -> str:
         raw = f"a/{candidate}".encode()
     if not raw.startswith(b"a/"):
         raise DiffParseError("unexpected path prefix in patch header")
-    return _decode_path(raw[2:])
+    return decode_path(raw[2:])
 
 
 def _closing_quote(text: str) -> int:
@@ -373,7 +394,10 @@ def _unquote(quoted: str) -> bytes:
     return bytes(out)
 
 
-def _decode_path(raw: bytes) -> str:
+def decode_path(raw: bytes) -> str:
+    """A repository-relative path from git output: UTF-8, no control characters, relative and
+    normalized (no empty, "." or ".." component), and no `.git` component (git never tracks one;
+    a crafted tree that has one targets git itself). Anything else raises UnsafePathError."""
     try:
         path = raw.decode("utf-8", "strict")
     except UnicodeDecodeError as exc:
@@ -385,4 +409,7 @@ def _decode_path(raw: bytes) -> str:
     pure = PurePosixPath(path)
     if pure.is_absolute() or any(part in {"", ".", ".."} for part in path.split("/")):
         raise UnsafePathError(f"path is absolute or not normalized: {sanitize.one_line(path)}")
+    # Case-insensitive file systems also treat ".GIT" or ".git." as ".git".
+    if any(part.rstrip(". ").casefold() == ".git" for part in path.split("/")):
+        raise UnsafePathError(f"path contains a .git component: {sanitize.one_line(path)}")
     return path

@@ -6,9 +6,11 @@ Exit codes: 0 nothing at or above the threshold, 1 findings at or above the thre
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import sys
+from collections.abc import Iterator
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, NoReturn
@@ -43,6 +45,13 @@ from git_reviewer.llm.ollama import (
 from git_reviewer.llm.structured import ChatFn, ollama_chat
 from git_reviewer.report import render
 from git_reviewer.report.model import exit_code
+from git_reviewer.sandbox.docker import DockerError, DockerSandbox, ImageMissingError
+from git_reviewer.sandbox.docker import sandbox_session as docker_session
+from git_reviewer.sandbox.endpoint import (
+    DockerUnavailableError,
+    UnsafeDockerEndpointError,
+    resolve_endpoint,
+)
 from git_reviewer.static.tools import StaticAnalysisError
 
 EXIT_OK = 0
@@ -88,25 +97,33 @@ def review(
     hook: Annotated[bool, typer.Option("--hook", hidden=True)] = False,
 ) -> None:
     """Review the staged changes (default) or a commit range."""
-    if run_tests or fix:
-        _fail(EXIT_USAGE, "--run-tests arrives in phase 4 and --fix in phase 5; not available yet")
+    if fix:
+        _fail(EXIT_USAGE, "--fix arrives in phase 5; not available yet")
     if hook and range_spec is not None:
         _fail(EXIT_USAGE, "--hook reviews the staged changes; it cannot be combined with --range")
     settings = _settings()
     repo = _repo(hook=hook)
     reviewer, guardian = _require_ollama(settings)
     _require_binary("gitleaks", "install it, e.g. brew install gitleaks")
-    context = ReviewContext(
-        repo=repo,
-        hook=hook,
-        # An empty --range is an error (parse_range refuses it), never "review staged".
-        range_spec=range_spec,
-        limits=DiffLimits(settings.max_diff_bytes, settings.max_files, settings.max_line_chars),
-        max_review_chars=settings.max_review_chars,
-        model_context_tokens=settings.model_context_tokens,
-        reviewer=reviewer,
-        guardian=guardian,
-    )
+    with _sandbox(settings) if run_tests else contextlib.nullcontext() as sandbox:
+        context = ReviewContext(
+            repo=repo,
+            hook=hook,
+            # An empty --range is an error (parse_range refuses it), never "review staged".
+            range_spec=range_spec,
+            limits=DiffLimits(settings.max_diff_bytes, settings.max_files, settings.max_line_chars),
+            max_review_chars=settings.max_review_chars,
+            model_context_tokens=settings.model_context_tokens,
+            reviewer=reviewer,
+            guardian=guardian,
+            sandbox=sandbox,
+        )
+        _review_and_exit(context, settings, mode, output_format)
+
+
+def _review_and_exit(
+    context: ReviewContext, settings: Settings, mode: Mode, output_format: OutputFormat
+) -> NoReturn:
     try:
         report = run_review(context)
     except (RefError, UnmergedPathsError) as exc:
@@ -161,7 +178,8 @@ def doctor() -> None:
         failed = True
         _line("FAIL", "ollama url", str(exc))
     failed |= not _check_binary("gitleaks", required=True)
-    _check_binary("docker", required=False, note="needed from phase 4")
+    if _check_binary("docker", required=False, note="needed for --run-tests"):
+        _check_docker(settings)
     raise typer.Exit(EXIT_ENVIRONMENT if failed else EXIT_OK)
 
 
@@ -241,6 +259,55 @@ def _require_ollama(settings: Settings) -> tuple[ChatFn, ChatFn]:
         ollama_chat(endpoint, settings.reviewer_model, **options),
         ollama_chat(endpoint, settings.guardian_model, **options),
     )
+
+
+@contextlib.contextmanager
+def _sandbox(settings: Settings) -> Iterator[DockerSandbox]:
+    """The Docker sandbox for --run-tests, checked before anything is reviewed. No Docker means
+    no tests, never a run on the host (exit 4); a remote Docker endpoint is refused (exit 2)."""
+    _require_binary("docker", "install Docker Desktop, or run without --run-tests")
+    try:
+        socket = resolve_endpoint()
+    except UnsafeDockerEndpointError as exc:
+        _fail(EXIT_BLOCKED, str(exc))
+    except DockerUnavailableError as exc:
+        _fail(EXIT_ENVIRONMENT, f"{exc} (start Docker, or run without --run-tests)")
+    image = settings.sandbox_image
+    with docker_session(socket, image, settings.sandbox_timeout_seconds) as sandbox:
+        try:
+            sandbox.check_daemon()
+            sandbox.image_id()
+        except ImageMissingError as exc:
+            _fail(EXIT_ENVIRONMENT, f"{exc}: build it once with: docker build -t {image} sandbox/")
+        except (DockerError, proc.ProcError) as exc:
+            _fail(EXIT_ENVIRONMENT, f"{exc} (start Docker, or run without --run-tests)")
+        yield sandbox
+
+
+def _check_docker(settings: Settings) -> None:
+    """Docker is only needed for --run-tests: problems are warnings, not failures."""
+    try:
+        socket = resolve_endpoint()
+    except (DockerUnavailableError, UnsafeDockerEndpointError) as exc:
+        _line("WARN", "docker endpoint", str(exc))
+        return
+    _line("OK", "docker endpoint", f"unix://{socket}")
+    image = settings.sandbox_image
+    with docker_session(socket, image, settings.sandbox_timeout_seconds) as sandbox:
+        try:
+            sandbox.check_daemon()
+            _line("OK", "docker daemon", "answers")
+            _line("OK", "sandbox image", f"{image} ({sandbox.image_id()[:19]})")
+            leftovers = sandbox.leftover_containers()
+        except ImageMissingError as exc:
+            _line("WARN", "sandbox image", f"{exc}: docker build -t {image} sandbox/")
+            return
+        except (DockerError, proc.ProcError) as exc:
+            _line("WARN", "docker daemon", str(exc))
+            return
+        if leftovers:
+            hint = "remove them with: docker rm -f $(docker ps -aq --filter label=git-reviewer.run)"
+            _line("WARN", "sandbox cleanup", f"{len(leftovers)} leftover container(s); {hint}")
 
 
 def _require_binary(name: str, hint: str) -> None:

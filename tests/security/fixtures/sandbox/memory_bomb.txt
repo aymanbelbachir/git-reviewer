@@ -1,0 +1,8 @@
+import pytest
+
+
+def test_memory_bomb():
+    blocks = []
+    for _ in range(64):
+        blocks.append(b"x" * (64 * 1024 * 1024))  # 4 GiB in total, every page written
+    pytest.fail("SANDBOX-ESCAPE: allocated 4 GiB")

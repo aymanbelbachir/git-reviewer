@@ -41,7 +41,12 @@ jobs:
         run: uv run --locked ruff check .
       - name: Format
         run: uv run --locked ruff format --check .
-      - name: Tests (unit + security)
+      - name: Build the sandbox image (pinned base digest, hashed packages)
+        run: docker build -t git-reviewer-sandbox:ci sandbox/
+      - name: Tests (unit + security, Docker attack tests required)
+        env:
+          GIT_REVIEWER_SANDBOX_IMAGE: git-reviewer-sandbox:ci
+          GIT_REVIEWER_REQUIRE_DOCKER: "1"
         run: uv run --locked pytest -ra
       - name: Bandit on the tool's code
         run: uv run --locked bandit -c pyproject.toml -r src

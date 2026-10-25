@@ -1,0 +1,6 @@
+# Planted as pytest.py at the root of the reviewed repository: if Python imported it instead of
+# the real pytest, every run would "pass" without running a single test.
+import sys
+
+print("Failed: SANDBOX-ESCAPE: the repository replaced pytest")
+sys.exit(0)

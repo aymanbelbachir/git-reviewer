@@ -184,3 +184,32 @@ def test_missing_final_newline_and_crlf(make_repo: Callable[..., Path]) -> None:
     git(repo, "add", "-A")
     (change,) = collect_staged(repo, LIMITS).files
     assert change.added_lines == {2, 3}
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [b".git/hooks/pre-commit", b"sub/.GIT/config", b"a/.git./x", b".git"],
+)
+def test_git_directory_paths_are_refused(raw: bytes) -> None:
+    from git_reviewer.git.diff import decode_path
+
+    with pytest.raises(UnsafePathError, match=r"\.git component"):
+        decode_path(raw)
+
+
+@pytest.mark.parametrize("raw", [b".github/workflows/ci.yml", b".gitignore", b"docs/.gitkeep"])
+def test_git_like_names_are_fine(raw: bytes) -> None:
+    from git_reviewer.git.diff import decode_path
+
+    assert decode_path(raw) == raw.decode()
+
+
+def test_staged_diff_records_the_index_it_was_read_from(make_repo: Callable[..., Path]) -> None:
+    repo = make_repo()
+    write_files(repo, {"a.py": "x = 1\n"})
+    git(repo, "add", "-A")
+    first = collect_staged(repo, LIMITS)
+    assert first.index_digest is not None
+    write_files(repo, {"b.py": "y = 1\n"})
+    git(repo, "add", "-A")
+    assert collect_staged(repo, LIMITS).index_digest != first.index_digest

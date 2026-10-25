@@ -7,16 +7,20 @@ from typing import Any
 
 from git_reviewer import sanitize
 from git_reviewer.guardians.base import worst
-from git_reviewer.models import SEVERITY_RANK, Decision, ReviewFinding, StaticFinding
+from git_reviewer.models import SEVERITY_RANK, Decision, ReviewFinding, SandboxRun, StaticFinding
 
 from .model import Report
 
+_OUTPUT_LINES_SHOWN = 15
 _STATUS_LINE = {
     "reviewed": "Reviewed.",
     "not_reviewed": "Not reviewed",
     "blocked": "Blocked by a security control: the change was not sent for review.",
     "empty": "Nothing to review.",
 }
+_BLOCKED_AFTER_REVIEW = (
+    "Blocked by a security control after the review: see the security report before committing."
+)
 
 
 def to_text(report: Report) -> str:
@@ -34,7 +38,8 @@ def to_text(report: Report) -> str:
         counts = ", ".join(f"{tool} {count} file(s)" for tool, count in report.coverage)
         out.append(f"  analyzed: {counts}")
     out.extend(_static_lines(report.static_findings) or ["  no findings on added lines"])
-    if report.status in {"reviewed", "not_reviewed"}:
+    after_review = _blocked_after_review(report)
+    if report.status in {"reviewed", "not_reviewed"} or after_review:
         out.append("")
         out.append("LLM review:")
         if report.status == "not_reviewed":
@@ -43,6 +48,13 @@ def to_text(report: Report) -> str:
             out.extend(_review_lines(report.review_findings) or ["  no findings"])
             if report.summary:
                 out.append(f"  summary: {sanitize.one_line(report.summary, max_chars=1000)}")
+    if report.tests_requested and (report.status == "reviewed" or after_review):
+        out.append("")
+        out.append("Sandbox (tests and linter of the reviewed code; their output is untrusted):")
+        if report.sandbox_note:
+            out.append(f"  {sanitize.one_line(report.sandbox_note)}")
+        for run in report.sandbox_runs:
+            out.extend(_sandbox_lines(run))
     out.append("")
     out.append("Security report:")
     out.extend(_decision_lines(report.decisions))
@@ -51,9 +63,21 @@ def to_text(report: Report) -> str:
     out.append("")
     if report.status == "not_reviewed":
         out.append(f"{_STATUS_LINE['not_reviewed']}: {sanitize.one_line(report.reason or '')}")
+    elif after_review:
+        out.append(_BLOCKED_AFTER_REVIEW)
     else:
         out.append(_STATUS_LINE[report.status])
     return "\n".join(out)
+
+
+def _blocked_after_review(report: Report) -> bool:
+    """Blocked only by the execution guardian: the review itself was done and is shown."""
+    blocks = [d for d in report.decisions if d.verdict == "block"]
+    return (
+        report.status == "blocked"
+        and bool(blocks)
+        and all(d.source.startswith("execution.") for d in blocks)
+    )
 
 
 def to_json(report: Report) -> str:
@@ -79,8 +103,23 @@ def to_json(report: Report) -> str:
         },
         "notes": list(report.notes),
         "coverage": dict(report.coverage),
+        "sandbox": {
+            "requested": report.tests_requested,
+            "note": report.sandbox_note,
+            "runs": [run.model_dump() for run in report.sandbox_runs],
+        },
     }
     return json.dumps(data, ensure_ascii=True)
+
+
+def _sandbox_lines(run: SandboxRun) -> list[str]:
+    code = "no exit code" if run.exit_code is None else f"exit {run.exit_code}"
+    detail = f": {sanitize.one_line(run.detail)}" if run.detail else ""
+    lines = [f"  {run.tool}: {run.outcome} ({code}, {run.seconds:.1f}s){detail}"]
+    if run.outcome != "passed":
+        tail = run.output.strip().splitlines()[-_OUTPUT_LINES_SHOWN:]
+        lines.extend(f"    | {sanitize.one_line(line)}" for line in tail)
+    return lines
 
 
 def _static_lines(findings: tuple[StaticFinding, ...]) -> list[str]:

@@ -11,7 +11,6 @@ SRC = Path(__file__).resolve().parents[2] / "src" / "git_reviewer"
 SUBPROCESS_MODULES = {"proc.py"}
 EFFECT_MODULES = {
     "proc.py",
-    "git/worktree.py",
     "git/snapshot.py",
     "sandbox/docker.py",
     "patch/apply.py",
@@ -93,6 +92,9 @@ def _is_open_for_writing(node: ast.Call) -> bool:
     )
     if not is_open:
         return False
+    is_os_open = isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+    if is_os_open and func.value.id == "os":  # type: ignore[union-attr]
+        return _os_open_may_write(node)
     # open(path, mode) has the mode second; Path.open(mode) has it first.
     position = 1 if isinstance(func, ast.Name) else 0
     modes = node.args[position : position + 1] + [
@@ -104,3 +106,39 @@ def _is_open_for_writing(node: ast.Call) -> bool:
         if set(mode.value) & {"w", "a", "x", "+"}:
             return True
     return False
+
+
+_OS_WRITE_FLAGS = {"O_WRONLY", "O_RDWR", "O_CREAT", "O_APPEND", "O_TRUNC", "O_EXCL"}
+
+
+def _os_open_may_write(node: ast.Call) -> bool:
+    """os.open(path, flags): read-only only when the flags are spelled out and none of them
+    writes. Flags held in a variable count as writing."""
+    flags = node.args[1:2] + [kw.value for kw in node.keywords if kw.arg == "flags"]
+    if not flags:
+        return True
+    names: set[str] = set()
+    for sub in ast.walk(flags[0]):
+        if isinstance(sub, ast.Attribute):
+            names.add(sub.attr)
+        elif isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+            names.add(sub.value)
+        elif isinstance(sub, ast.Name) and sub.id not in {"os", "getattr"}:
+            return True
+    return bool(names & _OS_WRITE_FLAGS)
+
+
+@pytest.mark.parametrize(
+    ("source", "writes"),
+    [
+        ("os.open(p, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))", False),
+        ("os.open(p, os.O_WRONLY | os.O_CREAT)", True),
+        ("os.open(p, flags)", True),
+        ("open(p, 'rb')", False),
+        ("Path(p).open('a')", True),
+    ],
+)
+def test_write_detection(source: str, writes: bool) -> None:
+    call = ast.parse(source, mode="eval").body
+    assert isinstance(call, ast.Call)
+    assert _is_open_for_writing(call) is writes

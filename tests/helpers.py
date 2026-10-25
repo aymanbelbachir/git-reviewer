@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import shutil
+import tempfile
+import weakref
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from git_reviewer import proc
 from git_reviewer.git.diff import DiffLimits
 from git_reviewer.graph.build import run_review
 from git_reviewer.graph.state import ReviewContext
+from git_reviewer.models import SandboxOutcome, SandboxRun, SandboxTool
 from git_reviewer.report.model import Report
+from git_reviewer.sandbox.docker import Sandbox, build_run_argv
+from git_reviewer.sandbox.policy import RunSpec
 
 LIMITS = DiffLimits(max_bytes=1024 * 1024, max_files=200, max_line_chars=10_000)
 
@@ -55,10 +61,24 @@ def guardian_json(verdict: str = "ok", reasons: list[str] | None = None, lines=N
     return json.dumps({"verdict": verdict, "reasons": reasons or [], "lines": lines or []})
 
 
+def stage(make_repo: Callable[..., Path], files: Mapping[str, str | bytes]) -> Path:
+    """A new repository with `files` staged on top of its first commit."""
+    repo = make_repo()
+    write_files(repo, files)
+    git(repo, "add", "-A")
+    return repo
+
+
 def run_graph(
-    repo: Path, llm: FakeLLM, *, max_chars: int = 60_000, context_tokens: int = 32_768
+    repo: Path,
+    llm: FakeLLM,
+    *,
+    max_chars: int = 60_000,
+    context_tokens: int = 32_768,
+    sandbox: Sandbox | None = None,
 ) -> Report:
-    """The whole review graph on the staged changes of `repo`, with a fake model."""
+    """The whole review graph on the staged changes of `repo`, with a fake model (and, for
+    --run-tests, a sandbox)."""
     context = ReviewContext(
         repo=repo,
         hook=False,
@@ -68,8 +88,83 @@ def run_graph(
         model_context_tokens=context_tokens,
         reviewer=llm,
         guardian=llm,
+        sandbox=sandbox,
     )
     return run_review(context)
+
+
+FAKE_IMAGE_ID = "sha256:" + "ab" * 32
+
+
+class FakeSandbox:
+    """Stands in for Docker: builds the real argv but runs nothing. Records what it was asked to
+    run and which files the exported tree contained; `on_run` can simulate a side effect. Its
+    workspace is a real private one, as the sandbox policy requires for the mount."""
+
+    def __init__(
+        self,
+        *,
+        outcomes: Mapping[SandboxTool, SandboxOutcome] | None = None,
+        image_error: Exception | None = None,
+        run_error: Exception | None = None,
+        on_run: Callable[[SandboxTool], None] | None = None,
+        leftovers: list[str] | None = None,
+    ) -> None:
+        workspace = Path(tempfile.mkdtemp(prefix="git-reviewer-sandbox-")).resolve()
+        weakref.finalize(self, shutil.rmtree, workspace, True)
+        self._tree = workspace / "tree"
+        self._tree.mkdir(mode=0o700)
+        self.outcomes: dict[SandboxTool, SandboxOutcome] = dict(outcomes or {})
+        self.image_error = image_error
+        self.run_error = run_error
+        self.on_run = on_run
+        self.leftovers = leftovers or []
+        self.runs: list[SandboxTool] = []
+        self.exported: list[str] = []
+
+    @property
+    def tree(self) -> Path:
+        return self._tree
+
+    def image_id(self) -> str:
+        if self.image_error is not None:
+            raise self.image_error
+        return FAKE_IMAGE_ID
+
+    def plan(self, tool: SandboxTool, run_id: str, image_id: str) -> tuple[list[str], RunSpec]:
+        spec = RunSpec(
+            socket=Path("/var/run/docker.sock"),
+            tree=self._tree,
+            run_id=run_id,
+            tool=tool,
+            image_id=image_id,
+            timeout_seconds=60,
+        )
+        return build_run_argv(spec), spec
+
+    def run(self, tool: SandboxTool, run_id: str, image_id: str) -> SandboxRun:
+        if self.run_error is not None:
+            raise self.run_error
+        self.runs.append(tool)
+        self.exported = sorted(
+            path.relative_to(self._tree).as_posix()
+            for path in self._tree.rglob("*")
+            if path.is_file()
+        )
+        if self.on_run is not None:
+            self.on_run(tool)
+        outcome: SandboxOutcome = self.outcomes.get(tool, "passed")
+        code = {"passed": 0, "failed": 1, "no_tests": 5, "killed": 137, "error": 2}[outcome]
+        return SandboxRun(
+            tool=tool,
+            outcome=outcome,
+            exit_code=code,
+            seconds=0.5,
+            output=f"{tool} output\nlast line of {tool}",
+        )
+
+    def leftover_containers(self, run_id: str | None = None) -> list[str]:
+        return list(self.leftovers)
 
 
 class FakeLLM:

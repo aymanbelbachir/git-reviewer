@@ -14,8 +14,9 @@ from typing import Annotated, TypedDict
 
 from git_reviewer.git.diff import DiffLimits
 from git_reviewer.llm.structured import ChatFn, ReviewerOutput
-from git_reviewer.models import Decision, Diff
+from git_reviewer.models import Decision, Diff, SandboxRun
 from git_reviewer.report.model import Report
+from git_reviewer.sandbox.docker import Sandbox
 from git_reviewer.static.analyze import StaticResult
 
 
@@ -28,6 +29,13 @@ class ReviewState(TypedDict, total=False):
     canary: str
     nonce: str
     not_reviewed: str
+    run_tests: bool
+    run_id: str
+    image_id: str
+    fingerprint: str
+    sandbox_runs: tuple[SandboxRun, ...]
+    sandbox_note: str
+    sandbox_skipped: tuple[str, ...]
     report: Report
 
 
@@ -41,3 +49,5 @@ class ReviewContext:
     model_context_tokens: int
     reviewer: ChatFn
     guardian: ChatFn
+    sandbox: Sandbox | None = None
+    """Set by --run-tests: the project's tests and linter then run in this sandbox."""

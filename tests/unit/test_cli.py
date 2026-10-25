@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -76,9 +76,8 @@ def test_nothing_staged(make_repo: Callable[..., Path], monkeypatch: pytest.Monk
     assert "Nothing to review" in result.output
 
 
-@pytest.mark.parametrize("flag", ["--run-tests", "--fix"])
-def test_future_flags_are_refused(staged_repo: Path, flag: str) -> None:
-    assert runner.invoke(cli.app, ["review", flag]).exit_code == cli.EXIT_USAGE
+def test_fix_is_not_available_yet(staged_repo: Path) -> None:
+    assert runner.invoke(cli.app, ["review", "--fix"]).exit_code == cli.EXIT_USAGE
 
 
 def test_hook_and_range_are_exclusive(staged_repo: Path) -> None:
@@ -304,3 +303,67 @@ def test_gitleaks_problems_are_environment_errors(
     assert expected in result.output
     if isinstance(error, proc.UnsafeBinaryError):
         assert "install it, e.g." not in result.output
+
+
+# --- --run-tests ------------------------------------------------------------------------------
+
+
+def test_run_tests_without_docker_is_an_environment_error_never_a_host_run(
+    staged_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from git_reviewer.sandbox.endpoint import DockerUnavailableError
+
+    def no_docker(environ: object = None) -> Path:
+        raise DockerUnavailableError("Docker is not running (no socket at /var/run/docker.sock)")
+
+    monkeypatch.setattr(cli, "resolve_endpoint", no_docker)
+    result = runner.invoke(cli.app, ["review", "--run-tests", "--mode", "warn"])
+    assert result.exit_code == cli.EXIT_ENVIRONMENT
+    assert "start Docker" in result.output
+
+
+def test_remote_docker_endpoint_is_blocked(
+    staged_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DOCKER_HOST", "tcp://203.0.113.5:2375")
+    result = runner.invoke(cli.app, ["review", "--run-tests", "--mode", "warn"])
+    assert result.exit_code == cli.EXIT_BLOCKED
+    assert "would leave this machine" in result.output
+
+
+def test_missing_image_says_how_to_build_it(
+    staged_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from git_reviewer.sandbox import docker
+
+    monkeypatch.setattr(cli, "resolve_endpoint", lambda: Path("/var/run/docker.sock"))
+    monkeypatch.setattr(docker.DockerSandbox, "check_daemon", lambda self: None)
+
+    def missing(self: object) -> str:
+        raise docker.ImageMissingError("the sandbox image git-reviewer-sandbox:0.1 is not built")
+
+    monkeypatch.setattr(docker.DockerSandbox, "image_id", missing)
+    result = runner.invoke(cli.app, ["review", "--run-tests"])
+    assert result.exit_code == cli.EXIT_ENVIRONMENT
+    assert "docker build -t git-reviewer-sandbox:0.1 sandbox/" in result.output
+
+
+def test_run_tests_end_to_end_with_a_fake_sandbox(
+    staged_repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import contextlib
+
+    from tests.helpers import FakeSandbox
+
+    sandbox = FakeSandbox(outcomes={"pytest": "failed"})
+
+    @contextlib.contextmanager
+    def fake_session(settings: object) -> Iterator[FakeSandbox]:
+        yield sandbox
+
+    monkeypatch.setattr(cli, "_sandbox", fake_session)
+    block = runner.invoke(cli.app, ["review", "--run-tests", "--format", "json"])
+    assert block.exit_code == cli.EXIT_FINDINGS
+    data = json.loads(block.stdout)
+    assert [run["outcome"] for run in data["sandbox"]["runs"]] == ["failed", "passed"]
+    assert sandbox.runs == ["pytest", "ruff"]

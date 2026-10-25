@@ -9,6 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field
 FileStatus = Literal["added", "modified", "deleted", "type_changed"]
 Severity = Literal["info", "low", "medium", "high", "critical"]
 Verdict = Literal["ok", "suspect", "block"]
+SandboxTool = Literal["pytest", "ruff"]
+SandboxOutcome = Literal["passed", "failed", "no_tests", "killed", "error"]
 
 SEVERITY_RANK: dict[Severity, int] = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 VERDICT_RANK: dict[Verdict, int] = {"ok": 0, "suspect": 1, "block": 2}
@@ -37,6 +39,9 @@ class Diff(BaseModel):
     head: str | None
     files: tuple[FileChange, ...]
     patch: str
+    index_digest: str | None = None
+    """Staged mode: hash of the index the diff was read from. Every later read of the index
+    (scanners, sandbox copy) must find the same index, or the review stops."""
 
     @property
     def added_line_count(self) -> int:
@@ -94,3 +99,18 @@ class Decision(BaseModel):
     verdict: Verdict
     reasons: tuple[str, ...] = Field(default=(), max_length=10)
     lines: tuple[LineRef, ...] = Field(default=(), max_length=50)
+
+
+class SandboxRun(BaseModel):
+    """One run of the project's tests or linter in the sandbox. Everything here comes from code
+    under review: a quality signal for the user, never a security decision (SECURITY.md T-34)."""
+
+    model_config = _FROZEN
+
+    tool: SandboxTool
+    outcome: SandboxOutcome
+    exit_code: int | None
+    seconds: float = Field(ge=0)
+    detail: str = Field(default="", max_length=300)
+    output: str = Field(default="", max_length=8_000)
+    """The end of the combined output, untrusted: masked and sanitized before display."""

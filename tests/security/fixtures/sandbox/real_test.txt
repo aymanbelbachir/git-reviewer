@@ -1,0 +1,5 @@
+import pytest
+
+
+def test_real_pytest_ran():
+    pytest.fail("ATTACK-BLOCKED: the real pytest ran")

@@ -1,0 +1,8 @@
+import pytest
+
+
+def test_output_flood():
+    chunk = "x" * (1024 * 1024)
+    for _ in range(64):
+        print(chunk)
+    pytest.fail("flooded")  # pytest then prints the 64 MiB it captured

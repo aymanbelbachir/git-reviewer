@@ -1,0 +1,18 @@
+import os
+import time
+
+import pytest
+
+
+def test_fork_bomb():
+    children = 0
+    try:
+        for _ in range(5000):
+            pid = os.fork()
+            if pid == 0:
+                time.sleep(60)
+                os._exit(0)
+            children += 1
+    except OSError:
+        pass
+    pytest.fail(f"ATTACK-BLOCKED forks={children}")

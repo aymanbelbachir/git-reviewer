@@ -19,9 +19,9 @@ from collections.abc import Iterator
 
 from git_reviewer.git.diff import PatchLine, patch_lines
 from git_reviewer.guardians import barriers
-from git_reviewer.guardians.base import decision, run_guardian
+from git_reviewer.guardians.base import Row, decision, run_guardian_batches
 from git_reviewer.llm import prompts
-from git_reviewer.llm.structured import ANSWER_TOKENS, ChatFn
+from git_reviewer.llm.structured import ChatFn
 from git_reviewer.models import (
     SEVERITY_RANK,
     Decision,
@@ -34,9 +34,6 @@ from git_reviewer.models import (
 _SCANNERS = frozenset({"ruff", "bandit", "gitleaks"})
 _CONTEXT_LINES = 1
 _CROSS_CHECK_DISTANCE = 2
-_MAX_BATCH_BYTES = 20_000
-_MAX_GUARDIAN_CALLS = 5
-_PROMPT_MARGIN_TOKENS = 1_024
 _DISMISSALS = (
     "false positive",
     "not an issue",
@@ -51,23 +48,14 @@ def guard_before_review(diff: Diff, chat: ChatFn, *, context_tokens: int) -> lis
     found = [decision("injection.barrier", result.verdict, result.reasons, result.lines)]
     if result.verdict != "suspect":
         return found
-    # Every token is at least one UTF-8 byte, so a batch of this many bytes always fits.
-    system = prompts.INJECTION_GUARDIAN_SYSTEM_PROMPT
-    budget = context_tokens - ANSWER_TOKENS - len(system.encode()) - _PROMPT_MARGIN_TOKENS
-    batches = _batches(_passages(diff, result.flagged), min(_MAX_BATCH_BYTES, budget))
-    if batches is None or len(batches) > _MAX_GUARDIAN_CALLS:
-        found.append(
-            decision(
-                "injection.agent",
-                "block",
-                ["too many or too long suspect passages for the guardian to check them all"],
-                result.lines,
-            )
-        )
-        return found
-    for text, shown in batches:
-        user = prompts.injection_guardian_user_prompt(text, prompts.new_nonce())
-        found.append(run_guardian("injection.agent", chat, system, user, allowed_lines=shown))
+    found += run_guardian_batches(
+        "injection.agent",
+        chat,
+        prompts.INJECTION_GUARDIAN_SYSTEM_PROMPT,
+        prompts.injection_guardian_user_prompt,
+        _passages(diff, result.flagged),
+        context_tokens=context_tokens,
+    )
     return found
 
 
@@ -148,7 +136,7 @@ def _strings(value: object) -> Iterator[str]:
             yield from _strings(item)
 
 
-def _passages(diff: Diff, flagged: list[PatchLine]) -> list[tuple[str, LineRef]]:
+def _passages(diff: Diff, flagged: list[PatchLine]) -> list[Row]:
     """The flagged lines with one neighbour on each side, as (`path:line: text`, line)."""
     lines = patch_lines(diff)
     wanted = set(flagged)
@@ -156,7 +144,7 @@ def _passages(diff: Diff, flagged: list[PatchLine]) -> list[tuple[str, LineRef]]
     for index, line in enumerate(lines):
         if line in wanted:
             keep.update(range(index - _CONTEXT_LINES, index + _CONTEXT_LINES + 1))
-    rows: list[tuple[str, LineRef]] = []
+    rows: list[Row] = []
     for index in sorted(i for i in keep if 0 <= i < len(lines)):
         line = lines[index]
         ref = LineRef(file=line.path, line=max(line.line, 1))
@@ -166,27 +154,3 @@ def _passages(diff: Diff, flagged: list[PatchLine]) -> list[tuple[str, LineRef]]
         if line not in in_patch:  # flagged file names
             rows.append((f"{line.path}: file name: {line.text}", LineRef(file=line.path, line=1)))
     return rows
-
-
-def _batches(
-    rows: list[tuple[str, LineRef]], max_bytes: int
-) -> list[tuple[str, frozenset[LineRef]]] | None:
-    """Group rows into batches of at most `max_bytes` UTF-8 bytes. Nothing is ever truncated:
-    None when a single row is too long to be checked at all."""
-    batches: list[tuple[str, frozenset[LineRef]]] = []
-    texts: list[str] = []
-    shown: set[LineRef] = set()
-    size = 0
-    for text, ref in rows:
-        row_bytes = len(text.encode()) + 1
-        if row_bytes > max_bytes:
-            return None
-        if size + row_bytes > max_bytes:
-            batches.append(("\n".join(texts), frozenset(shown)))
-            texts, shown, size = [], set(), 0
-        texts.append(text)
-        shown.add(ref)
-        size += row_bytes
-    if texts:
-        batches.append(("\n".join(texts), frozenset(shown)))
-    return batches

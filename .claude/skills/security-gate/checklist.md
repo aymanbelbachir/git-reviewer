@@ -38,13 +38,17 @@ SECURITY.md; section numbers to docs/ARCHITECTURE.md. The phase in brackets is w
   and removes the container.
 - R3.5 No host environment: no `--env-file`, only allowlisted `--env NAME=VALUE` values; a bare
   `--env NAME` (which copies the host value) is rejected.
-- R3.6 The only mount is the read-only temp worktree: no home, `~/.ssh`, `~/.aws`, Docker socket, or the
-  user's working directory. Tested.
-- R3.7 Tests run on a temp git worktree created with hooks disabled, never on the working directory.
+- R3.6 The only mount is the read-only sandbox copy, and the policy itself requires it to be
+  `<temp>/git-reviewer-sandbox-*/tree` in a 0700 directory of the user: no home, `~/.ssh`, `~/.aws`,
+  Docker socket, or the user's working directory. Tested.
+- R3.7 Tests run on a read-only copy of the reviewed tree exported from git objects (no symlinks,
+  no untracked files, nothing written to the user's `.git`), never on the working directory.
 - R3.8 Docker unavailable means refusal (exit code 4) and no host code path, with a test.
 - R3.9 Only a local Docker endpoint is accepted, and every call uses `--host unix://<validated socket>`
   with an empty `DOCKER_CONFIG`; the tool never builds or pulls images (no network); the image is
-  referenced by the local image ID recorded by `doctor`.
+  run by its local image ID, resolved once per review and re-checked before each run.
+- R3.11 The argv is checked against `sandbox.policy`'s own copy of the options before every run,
+  including inside the runner itself, and a test pins that copy literally.
 - R3.10 `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--pull=never`.
 
 ## R4. Patches [phase 5]

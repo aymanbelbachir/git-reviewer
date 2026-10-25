@@ -1,7 +1,8 @@
 # git-reviewer: architecture plan
 
-Status: plan (phase 1). No tool code exists yet. Every design decision below states its
-security rationale; threat IDs (`T-xx`) refer to [SECURITY.md](../SECURITY.md).
+Status: phases 2 to 4 are implemented as described here; the sections for later phases (patches,
+hook) are still the plan. Every design decision below states its security rationale; threat IDs
+(`T-xx`) refer to [SECURITY.md](../SECURITY.md).
 
 ## 1. Scope
 
@@ -37,9 +38,10 @@ Rules that follow from the boundary:
 
 1. Untrusted data flows *through* the graph but never chooses an effect. Only deterministic
    code decides what to run, what to write and whether to block.
-2. Effects live in exactly seven modules: `proc` (subprocess), `git.snapshot` (exports the
-   reviewed files into a private temp dir for the scanners), `git.worktree`, `sandbox.docker`,
-   `patch.apply`, `hook.install` (writes `.git/hooks`) and `report.write` (report and log files).
+2. Effects live in exactly six modules: `proc` (subprocess), `git.snapshot` (exports the reviewed
+   files, or the whole reviewed tree, from git objects into a private temp dir for the scanners
+   and the sandbox), `sandbox.docker`, `patch.apply`, `hook.install` (writes `.git/hooks`) and
+   `report.write` (report and log files).
    Nothing else may spawn a process or write outside a private temp dir. A unit test enforces this
    by scanning every other module for `subprocess`, `os.system`, `shutil.rmtree`, `open(..., "w"/"a"/"x")`,
    `Path.write_*`, `os.replace`, `os.rename`, `os.chmod` and `os.symlink`.
@@ -60,8 +62,7 @@ src/git_reviewer/
   git/
     diff.py            # collect diff, parse hunks into a DiffIndex {path -> added line numbers}
     refs.py            # validate refs with `rev-parse --verify --end-of-options`
-    snapshot.py        # exports the reviewed version of changed files for the scanners
-    worktree.py        # private temp worktree lifecycle, symlink neutralization
+    snapshot.py        # exports the reviewed files (scanners) or the whole reviewed tree (sandbox)
   static/
     tools.py           # ruff, bandit, gitleaks with OUR configs, suppressions ignored
     analyze.py         # findings on added lines + own checks (suppression markers, config edits)
@@ -75,6 +76,7 @@ src/git_reviewer/
     barriers.py        # deterministic checks: unicode, encoded blobs, AI-addressed phrases, docker argv
     injection.py execution.py patch_auditor.py
   sandbox/
+    endpoint.py        # resolve and validate the local Docker socket
     docker.py          # build the docker argv, run, kill, remove, verify removal
     policy.py          # assertions on the argv actually built (execution guardian barrier)
     fingerprint.py     # hash of the user's working tree + .git control files
@@ -92,6 +94,7 @@ src/git_reviewer/
     install.py         # install / chain / refuse / uninstall
     pre-commit.sh.tmpl
 sandbox/Dockerfile     # sandbox image: base pinned by digest, tools installed with hashes
+sandbox/requirements.txt  # pytest and ruff for the image, pinned with hashes
 scripts/eval_guardians.py   # guardian detection / false-positive metrics (dev tool, not shipped)
 tests/
   unit/                # fast, no Docker, no Ollama (LLM calls faked)
@@ -108,7 +111,7 @@ tests/
 | `git-reviewer review [--range A..B] [--run-tests] [--fix] [--format text\|json] [--mode block\|warn]` | Run the review graph. |
 | `git-reviewer install-hook [--mode block\|warn] [--chain]` | Install the pre-commit hook (§13). |
 | `git-reviewer uninstall-hook` | Remove our hook, restore a chained one. |
-| `git-reviewer doctor [--cleanup]` | Check Ollama (local, models present, not cloud), Docker (local endpoint), the sandbox image, gitleaks; list or clean stale worktrees and containers. |
+| `git-reviewer doctor` | Check git, Ollama (local, models present, not cloud), gitleaks and, as warnings since only `--run-tests` needs them, Docker (local endpoint, daemon, sandbox image) and leftover sandbox containers. |
 
 `--fix` implies `--run-tests`: a patch is only shown after it passed the sandbox validation.
 
@@ -117,6 +120,10 @@ network call except to Ollama. The user builds it once with a documented `docker
 
 Security blocks (barrier, guardian, canary, unsafe paths) exit 2 even in warn mode: warn mode only
 turns findings and resource limits into warnings.
+
+With `--run-tests`, tests that did not pass (failed, killed by a limit, could not run) also exit 1 in
+block mode. The project's own linter run is informational: it covers the whole repository, and the
+added lines are already checked by git-reviewer's ruff run.
 
 Exit codes: `0` nothing at or above the threshold, `1` findings at or above the threshold (block mode),
 `2` blocked by a security control (barrier, guardian, policy), `3` usage or configuration error,
@@ -185,8 +192,13 @@ Design rules:
   `-c diff.suppressBlankEmpty=false`, so neither a branch's `.gitmodules` (`ignore = all`) nor local
   config can hide a change or shift line numbers; every hunk's line counts are checked against its
   header, and a mismatch stops the review.
-- Every git call on untrusted content uses `--no-ext-diff --no-textconv --no-color` (plus
-  `--binary` for the staged diff that is replayed in the worktree, §8.1),
+- A path with a `.git` component (also `.GIT` or `.git.`, as case-insensitive file systems see them)
+  stops the review: git never tracks one, so only a crafted tree has it, and it targets git itself.
+- Staged mode records a hash of the index (`ls-files --stage -z`) read before and after the diff
+  (they must match). Every later read of the index, for the scanners and for the sandbox copy, must
+  find the same hash; a file staged during the review (by the user or an IDE) is never scanned or
+  run without having been reviewed. In hook mode git locks the index; a range uses commit IDs.
+- Every git call on untrusted content uses `--no-ext-diff --no-textconv --no-color`,
   `-c core.hooksPath=/dev/null -c core.fsmonitor=false`, `--attr-source=<empty tree>` (a
   branch's `.gitattributes` with `* -diff` or `binary` would otherwise make git print "Binary
   files differ" instead of the code; needs git 2.40+, checked by `doctor`), and an environment with
@@ -296,25 +308,37 @@ Design rules:
 ## 8. Sandbox
 
 ### 8.1 Workspace
-- A private temp dir (`mkdtemp`, mode 0700) holds a detached worktree created with hooks disabled:
-  `git -c core.hooksPath=/dev/null worktree add --detach <tmp>/wt <commit>`. In staged mode the
-  staged diff is then applied inside the worktree. The user's working directory is never mounted.
-- The worktree contains committed and staged content only, so untracked files such as `.env` are
-  not exposed to the tests (T-11).
-- Symlinks whose target resolves outside the worktree are removed from the copy and reported as
-  findings (T-18). They would dangle inside the container anyway; removing them also protects
-  our own host-side reads.
-- Cleanup in `finally`: `git worktree remove --force`, `git worktree prune`, temp dir removal.
-  `doctor --cleanup` handles leftovers after a crash.
+- A private temp dir (`mkdtemp`, mode 0700) holds `tree/` and an empty `docker-config/`.
+- `git.snapshot.export_tree` writes the reviewed tree into `tree/` straight from git objects: the
+  index in staged and hook mode (the hook's `GIT_INDEX_FILE`), HEAD of the range otherwise. This
+  replaces a `git worktree add`, which would write `.git/worktrees/<id>`, run checkout (and any
+  filter configured for the repository) and create symlinks. The user's working directory is never
+  mounted and nothing is written to the user's `.git`.
+- Only regular files are copied (dirs 0755, files 0644 or 0755 so the sandbox user can read them;
+  the private parent keeps other local users out). Symlinks and submodules are never materialized
+  and are listed in the report notes (T-18). Paths are validated like diff paths (no `..`,
+  absolute, control characters or `.git` component); an unsafe path anywhere in the tree is a
+  security block (`execution.tree`), not just "tests not run". Limits: 20,000 files and 256 MiB,
+  otherwise the tests are not run.
+- Untracked files such as `.env` are never copied, since only git objects are read (T-11). The
+  copy has no `.git`: tests that need git metadata fail.
+- Cleanup in `finally` (the temp dir is removed); nothing else to clean up after a crash.
 
 ### 8.2 Image
-- Built from `sandbox/Dockerfile`: base `python:3.12-slim` pinned by digest, pytest and ruff
-  installed from a hashed requirements file, user `10001:10001`. The user builds it once with the
-  `docker build` command documented in the README.
-- A locally built image has no registry digest, and a tag can be repointed by anything on the
-  machine. So `doctor` records the **local image ID** (`sha256:…` from `docker image inspect`) in the
-  user config after the build, and every run uses that ID, re-checked with `docker image inspect`
-  just before `docker run`.
+- Built from `sandbox/Dockerfile`: base `python:3.12-slim` pinned by its multi-platform index
+  digest, pytest and ruff installed from `sandbox/requirements.txt` with `--require-hashes` and
+  wheels only, user `10001:10001`. The user builds it once (`docker build -t git-reviewer-sandbox:0.1
+  sandbox/`, see the README); CI builds it the same way.
+- A `.pth` file in the image's site-packages appends `/work/src` and `/work` to `sys.path`, after the
+  standard library and the installed packages, and the runner uses `python -P` (no current
+  directory in front). So the reviewed code is importable, but a `pytest.py`, `pluggy.py` or
+  `json.py` in the repository cannot replace the real module and fake a result. Trade-off: a project
+  module named like a standard-library module is not importable in the sandbox.
+- The image name comes from the user config (`sandbox_image`, default `git-reviewer-sandbox:0.1`; an
+  image ID `sha256:...` is accepted too). It is resolved to its local image ID once per review, that
+  ID is what `docker run` gets, and it is checked again right before each run, so the image cannot
+  change in the middle of a review. Anyone who could re-tag images already controls Docker, which is
+  root-equivalent on the machine.
 - **Dependencies of the reviewed project are never installed from the reviewed ref.** Installing them
   would run build code from the attacker with network access. The README documents how to build a
   derived image from a requirements file the user exports from a ref they trust (default: the base
@@ -323,45 +347,63 @@ Design rules:
   fail. The report says so explicitly ("dependency change detected: tests ran with base dependencies").
 
 ### 8.3 Container command
-The argv built by `sandbox.docker`, asserted field by field by `sandbox.policy` before running:
+The argv built by `sandbox.docker`, asserted field by field by `sandbox.policy` before running (once
+by the execution guardian, again inside the runner):
 
 ```
-docker --host unix:///<validated socket path>
-run --rm --pull=never --init
-  --name gr-<uuid> --label git-reviewer.run=<uuid>
+docker --host unix://<validated socket> run
+  --rm --pull=never --init
+  --name=gr-<run id>-<tool> --label=git-reviewer.run=<run id>
   --network=none
   --user=10001:10001
-  --read-only --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m
-  --mount type=bind,source=<tmp>/wt,target=/work,readonly
+  --read-only --tmpfs=/tmp:rw,noexec,nosuid,nodev,size=256m
+  --mount=type=bind,source=<tmp>/tree,target=/work,readonly
   --workdir=/work
   --cap-drop=ALL --security-opt=no-new-privileges
   --pids-limit=256 --memory=1g --memory-swap=1g --cpus=1
-  --env HOME=/tmp --env PYTHONDONTWRITEBYTECODE=1 --env PYTHONPATH=/work/src:/work
-  sha256:<local image id recorded by doctor>
-  <runner> pytest|ruff
+  --log-driver=none
+  --env=HOME=/tmp --env=PYTHONDONTWRITEBYTECODE=1
+  sha256:<local image id>
+  timeout --signal=KILL <N>s python -P -m pytest -q -p no:cacheprovider --color=no
+                         (or: ruff check --no-cache --output-format=concise .)
 ```
 
-- Only the explicit `--env` values above, each in `NAME=VALUE` form; no `--env-file`. A bare
-  `--env NAME` makes Docker copy the host's value, so the policy rejects it.
-- No mount other than the read-only worktree: no home, `~/.ssh`, `~/.aws`, Docker socket.
-- A host-side wall-clock timeout runs `docker kill`, then `docker rm -f` in `finally`; the post
-  guardian checks that no container with the run label remains (T-12, T-14).
-- The Docker endpoint is resolved once (from `DOCKER_HOST` or the current context in
-  `~/.docker/config.json`, e.g. `~/.docker/run/docker.sock` with Docker Desktop) and must be a local
-  Unix socket; `tcp://` and `ssh://` are refused, because the code would leave the machine (T-17).
-  Every `docker` call then gets `--host unix://<that socket>` and `DOCKER_CONFIG` pointing at an empty
-  private dir, so the endpoint used is the endpoint validated; `sandbox.policy` asserts `--host` too.
-- If Docker is missing or unreachable, the command exits with code 4. There is no host fallback (T-16).
+- `sandbox.policy` keeps its own copy of these options, apart from the builder: every option must
+  be present exactly once and nothing else is accepted, so `-v`, `--privileged`, `--env-file`,
+  `--network=host`, a second mount or a bare `--env NAME` (which copies the host's value) all stop
+  the run. A unit test pins the option list literally (T-15).
+- The mount source is checked on its own too, not just compared with what the builder planned: it
+  must be `<temp dir>/git-reviewer-sandbox-*/tree` inside a 0700 directory of the current user. So a
+  change that pointed the mount at the repository, the home directory or `/` is refused even if
+  the builder and the plan agree.
+- `--log-driver=none`: the output reaches us through the attached client only; Docker keeps no log
+  file of it (it may quote secrets).
+- The run is bounded twice: `timeout --signal=KILL` inside the container (it stops even if
+  git-reviewer dies) and a host-side timeout (N + 30 s) on the docker client. `docker rm -f` runs in
+  `finally`; the execution guardian then checks that no container with the run label remains
+  (T-12, T-14). Output is capped at 4 MiB (an output flood stops the run) and the report keeps the
+  last 8,000 characters, masked and sanitized.
+- The Docker endpoint is resolved once by `sandbox.endpoint`: `DOCKER_HOST`, else the current
+  context (`DOCKER_CONTEXT`, or `currentContext` in the Docker config file, nothing else of which is
+  read), else `/var/run/docker.sock`. It must be a `unix://` socket owned by root or the user, in a
+  directory others cannot write; `tcp://` and `ssh://` exit 2, because the code would leave the
+  machine (T-17). Every docker call then gets `--host unix://<resolved socket>` and `DOCKER_CONFIG`
+  pointing at the empty private dir, so the endpoint used is the endpoint validated.
+- If Docker is missing, not running, or the image is not built, `--run-tests` exits 4 before the
+  review starts. There is no host fallback (T-16).
 - Test results are untrusted: test code can fake a pass (`os._exit(0)`, conftest hooks). They are a
   quality signal for the user, never a security decision (T-34).
+- Tests run only after a completed review (they are skipped when the review is blocked or "not
+  reviewed").
 
 ## 9. Configuration
 - Sources, highest first: CLI flags, `GIT_REVIEWER_*` environment variables, the user config file
   (`~/.config/git-reviewer/config.toml`). **No configuration is read from the reviewed repository**
   in v1: a malicious branch could otherwise point `ollama_url` at a remote host or loosen limits (T-27).
 - Keys: `ollama_url`, `reviewer_model`, `guardian_model` (separate from the reviewer, as the spec
-  requires), timeouts, size limits, sandbox resources, severity threshold. Security limits have
-  hard upper bounds in code.
+  requires), timeouts, size limits, severity threshold, `sandbox_image` and
+  `sandbox_timeout_seconds` (10 to 1,800, default 300). The sandbox's memory, CPU and process
+  limits are fixed in code, not configurable. Security limits have hard upper bounds in code.
 - Defaults to settle in phase 2: reviewer `qwen2.5-coder:7b` (fits a 16 GB machine; `:14b` if
   memory allows). The guardian model should come from a different model family, so an injection
   tuned for one model is less likely to fool both; the choice is driven by the red-team metrics.
@@ -431,19 +473,31 @@ After the review:
   "probable injection". Static findings are always in the report whatever the LLM says.
 
 ### 10.2 Execution guardian
-Before each sandbox run:
-- Barrier: `sandbox.policy` asserts the exact argv (§8.3). One deviation → no run.
-- Agent: reads test files, `conftest.py`, `setup.py`, `pyproject.toml`, `pytest.ini`, fixtures and
-  any `*.pth` / `sitecustomize.py` touched by the diff, and flags network access, subprocesses, reads
+Before the sandbox runs:
+- Barrier: `sandbox.policy` asserts the exact argv of both runs (§8.3). One deviation → no run.
+- Agent: reads the added and context lines of the changed test infrastructure: test files
+  (`test_*.py`, `*_test.py`, anything under `tests/`, `test/`, `testing/`, `fixtures/`),
+  `conftest.py`, `setup.py`, `setup.cfg`, `pyproject.toml`, `pytest.ini`, `pytest.toml`,
+  `.pytest.toml`, `.pytest.ini`, `tox.ini`, `noxfile.py`, `*.pth`, `sitecustomize.py` and
+  `usercustomize.py`. It flags network access, subprocesses, reads
   outside the repo, environment harvesting, `eval`/`exec`/`compile`, `__import__`/`getattr` chains,
-  encoded payloads. A block means the tests are not run, even in the sandbox (defense in depth
-  against container escapes).
+  encoded payloads and tampering with the test run. Lines are sent in batches that fit its context
+  (like the anti-injection agent); more than 5 batches, or a failure, is a block. A block means the
+  tests are not run, even in the sandbox (defense in depth against container escapes). When no test
+  infrastructure changed, the agent is not called.
 
-After each sandbox run:
-- The user's working directory fingerprint (hashes of tracked files, untracked non-ignored files,
-  `.git/HEAD`, `.git/config`, `.git/hooks/*` and `.git/index`; symlinks are hashed, not followed) must
-  equal the one taken before. Our own `.git/worktrees/<id>` entry is the only expected change.
-- No container with the run label exists (`docker ps -a --filter label=…`).
+After the sandbox runs (also when a run failed):
+- The user's working directory fingerprint must equal the one taken before: content hashes of
+  tracked files and untracked non-ignored files, `HEAD`, `index` and `config.worktree` of the
+  current worktree, and `config`, `hooks/` and `info/` of the common git directory (a different
+  directory in a linked worktree). Symlinks are hashed as their target text, never followed; a file
+  that cannot be read is an error, never skipped. Nothing is expected to change, since nothing is
+  written to the user's `.git`.
+- No container with the run label exists (`docker ps --all --filter label=…`).
+- Either check failing, or not being possible, is a block (exit 2, even in warn mode), and the
+  block keeps the cause (for example "Docker did not answer in time").
+- The report says whether a block came before the review ("not sent for review") or after it
+  (execution guardian); after it, the review findings and the test results stay visible.
 
 ### 10.3 Patch auditor
 - Separate component and prompt from the patch author. It receives only the structured finding and
@@ -469,7 +523,7 @@ After each sandbox run:
    (`.git-reviewer*`, `.gitleaks.toml`, `.gitleaksignore`, `ruff.toml`, `.ruff.toml`, `.bandit`),
    files that editors and coding agents load automatically (`.envrc`, `.vscode/`, `.idea/`,
    `.devcontainer/`, `.claude/`, `.cursor/`, `CLAUDE.md`, `AGENTS.md`), and `.gitattributes`, `.gitmodules`.
-3. Apply in the temp worktree → execution guards → sandbox validation → deterministic checks →
+3. Apply to the sandbox copy of the tree → execution guards → sandbox validation → deterministic checks →
    auditor. Up to 3 attempts; test failures are fed back to the author only as a sanitized summary
    (test ids and truncated messages inside nonce delimiters), because test output is attacker-controlled.
 4. The CLI shows the full diff (sanitized, invisible characters made visible) and asks for a typed
@@ -527,8 +581,9 @@ exec "/absolute/path/to/git-reviewer" review --hook --mode block
 - **Malicious fixtures are data.** They live in `tests/security/fixtures/` and
   `tests/guardians/datasets/` as `.diff`, `.json` or `.txt` files (never `test_*.py`), excluded via
   pytest `norecursedirs`, and excluded from ruff, bandit and pyright. Only the sandbox ever executes
-  them (copied into a worktree), so the host never runs a fork bomb (T-32).
-- Docker-backed tests are marked `docker`. When Docker is unavailable they are reported as skipped,
+  them (copied into a temporary repository), so the host never runs a fork bomb (T-32).
+- Docker-backed tests are marked `docker`. When Docker is unavailable they are reported as skipped
+  (CI sets `GIT_REVIEWER_REQUIRE_DOCKER=1`, which turns that skip into a failure),
   and `verify` reports skipped security tests as a failure, never as green.
 - An autouse fixture blocks any socket connection that is not to loopback.
 - Guardian datasets: one JSON file per sample:
@@ -543,7 +598,7 @@ exec "/absolute/path/to/git-reviewer" review --hook --mode block
 |---|---|
 | 2 | `pyproject.toml` + `uv.lock`, CI, `cli.py`, `config.py`, `proc.py`, `git/diff.py`, `git/refs.py`, `llm/ollama.py` checks, telemetry off, socket guard |
 | 3 | `static/*`, `llm/prompts.py`, `llm/structured.py`, `graph/*` without sandbox, `report/*`, `sanitize.py`, injection guardian |
-| 4 | `git/worktree.py`, `sandbox/*`, `sandbox/Dockerfile`, execution guardian |
+| 4 | `git/snapshot.py` tree export, `sandbox/*`, `sandbox/Dockerfile`, execution guardian |
 | 5 | `patch/*`, patch auditor, fix loop |
 | 6 | `hook/*` |
 | 7 | full security suite, guardian datasets ≥ 20 per guardian, `/red-team`, `/security-gate`, final audit |

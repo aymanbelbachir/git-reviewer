@@ -9,16 +9,9 @@ import pytest
 
 from git_reviewer.git.diff import DiffLimits, collect_staged
 from git_reviewer.guardians.barriers import addresses_an_ai, scan
-from tests.helpers import git, write_files
+from tests.helpers import stage as staged
 
 LIMITS = DiffLimits(max_bytes=1024 * 1024, max_files=200, max_line_chars=10_000)
-
-
-def staged(make_repo: Callable[..., Path], files: dict[str, str]) -> Path:
-    repo = make_repo()
-    write_files(repo, files)
-    git(repo, "add", "-A")
-    return repo
 
 
 @pytest.mark.parametrize(

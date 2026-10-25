@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any, Literal
 
 from langgraph.runtime import Runtime
 
-from git_reviewer import sanitize
+from git_reviewer import proc, sanitize
 from git_reviewer.git.diff import collect_range, collect_staged, numbered_view
+from git_reviewer.git.snapshot import SnapshotError, UnsafeTreeError, export_tree
+from git_reviewer.guardians import execution
 from git_reviewer.guardians.base import decision, worst
 from git_reviewer.guardians.injection import guard_after_review, guard_before_review
 from git_reviewer.llm import prompts
@@ -19,8 +22,10 @@ from git_reviewer.llm.structured import (
     ReviewerOutput,
     ask_json,
 )
-from git_reviewer.models import Decision, ReviewFinding
+from git_reviewer.models import Decision, ReviewFinding, SandboxRun
 from git_reviewer.report.model import Report, Status
+from git_reviewer.sandbox.docker import SANDBOX_TOOLS, DockerError, Sandbox
+from git_reviewer.sandbox.fingerprint import FingerprintError, fingerprint
 from git_reviewer.static.analyze import run_static_analysis
 
 from .state import ReviewContext, ReviewState
@@ -112,6 +117,62 @@ def injection_guard_post(state: ReviewState, runtime: Runtime[ReviewContext]) ->
     return {"decisions": tuple(found)}
 
 
+def execution_guard_pre(state: ReviewState, runtime: Runtime[ReviewContext]) -> dict[str, Any]:
+    ctx = runtime.context
+    sandbox = _sandbox(ctx)
+    run_id = uuid.uuid4().hex
+    try:
+        image_id = sandbox.image_id()
+    except (DockerError, proc.ProcError) as exc:
+        return {"sandbox_note": f"tests not run: {exc}"}
+    plans = [sandbox.plan(tool, run_id, image_id) for tool in SANDBOX_TOOLS]
+    found = [execution.check_argv(plans)]
+    if found[0].verdict != "block":
+        found += execution.check_test_changes(
+            _need(state, "diff"), ctx.guardian, context_tokens=ctx.model_context_tokens
+        )
+    return {"decisions": tuple(found), "run_id": run_id, "image_id": image_id}
+
+
+def sandbox_tests(state: ReviewState, runtime: Runtime[ReviewContext]) -> dict[str, Any]:
+    ctx = runtime.context
+    sandbox = _sandbox(ctx)
+    try:
+        exported = export_tree(ctx.repo, _need(state, "diff"), sandbox.tree, hook=ctx.hook)
+        before = fingerprint(ctx.repo, hook=ctx.hook)
+    except UnsafeTreeError as exc:
+        found = decision("execution.tree", "block", [str(exc)])
+        return {"decisions": (found,), "sandbox_note": "tests not run: unsafe reviewed tree"}
+    except (SnapshotError, FingerprintError, proc.ProcError) as exc:
+        return {"sandbox_note": f"tests not run: {exc}"}
+    update: dict[str, Any] = {"fingerprint": before, "sandbox_skipped": exported.skipped}
+    runs: list[SandboxRun] = []
+    try:
+        for tool in SANDBOX_TOOLS:
+            runs.append(sandbox.run(tool, _need(state, "run_id"), _need(state, "image_id")))
+    except (DockerError, proc.ProcError) as exc:
+        update["sandbox_note"] = f"the sandbox failed: {exc}"
+    update["sandbox_runs"] = tuple(runs)
+    return update
+
+
+def execution_guard_post(state: ReviewState, runtime: Runtime[ReviewContext]) -> dict[str, Any]:
+    ctx = runtime.context
+    before = state.get("fingerprint")
+    after: str | Exception | None = None
+    if before is not None:
+        try:
+            after = fingerprint(ctx.repo, hook=ctx.hook)
+        except (FingerprintError, proc.ProcError) as exc:
+            after = exc
+    leftovers: list[str] | Exception
+    try:
+        leftovers = _sandbox(ctx).leftover_containers(_need(state, "run_id"))
+    except (DockerError, proc.ProcError) as exc:
+        leftovers = exc
+    return {"decisions": tuple(execution.guard_after_run(before, after, leftovers))}
+
+
 def final_report(state: ReviewState, runtime: Runtime[ReviewContext]) -> dict[str, Any]:
     diff = state.get("diff")
     static = state.get("static")
@@ -137,9 +198,15 @@ def final_report(state: ReviewState, runtime: Runtime[ReviewContext]) -> dict[st
         else (),
         summary=sanitize.mask_secrets(review.summary, secrets) if review else "",
         decisions=tuple(_masked_decision(d, secrets) for d in decisions),
-        notes=static.notes if static else (),
+        notes=(*(static.notes if static else ()), *_sandbox_notes(state)),
         coverage=static.coverage if static else (),
         reason=state.get("not_reviewed"),
+        tests_requested=state.get("run_tests", False),
+        sandbox_runs=tuple(
+            run.model_copy(update={"output": sanitize.mask_secrets(run.output, secrets)})
+            for run in state.get("sandbox_runs", ())
+        ),
+        sandbox_note=state.get("sandbox_note"),
     )
     return {"report": report}
 
@@ -158,11 +225,37 @@ def route_after_review(state: ReviewState) -> Literal["injection_guard_post", "f
     return "final_report" if "not_reviewed" in state else "injection_guard_post"
 
 
+def route_after_post(state: ReviewState) -> Literal["execution_guard_pre", "final_report"]:
+    if worst(state.get("decisions", ())) == "block" or not state.get("run_tests", False):
+        return "final_report"
+    return "execution_guard_pre"
+
+
+def route_after_execution_pre(state: ReviewState) -> Literal["sandbox_tests", "final_report"]:
+    if worst(state.get("decisions", ())) == "block" or "sandbox_note" in state:
+        return "final_report"
+    return "sandbox_tests"
+
+
 def _need(state: ReviewState, key: str) -> Any:
     """A key earlier nodes must have set. Missing means a wiring bug: fail, never guess."""
     if key not in state:
         raise RuntimeError(f"review graph state is missing {key!r}")
     return state[key]  # type: ignore[literal-required]
+
+
+def _sandbox(ctx: ReviewContext) -> Sandbox:
+    if ctx.sandbox is None:
+        raise RuntimeError("a sandbox node ran without --run-tests")
+    return ctx.sandbox
+
+
+def _sandbox_notes(state: ReviewState) -> list[str]:
+    skipped = state.get("sandbox_skipped", ())
+    if not skipped:
+        return []
+    shown = ", ".join(skipped[:10]) + (", ..." if len(skipped) > 10 else "")
+    return [f"not copied into the sandbox (symlinks and submodules): {shown}"]
 
 
 def _masked_finding(finding: ReviewFinding, secrets: tuple[str, ...]) -> ReviewFinding:

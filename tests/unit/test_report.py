@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from git_reviewer.models import Decision, ReviewFinding, StaticFinding
+from git_reviewer.models import Decision, ReviewFinding, SandboxRun, StaticFinding
 from git_reviewer.report import render
 from git_reviewer.report.model import Report, exit_code
 
@@ -82,3 +82,62 @@ def test_json_is_ascii_and_complete() -> None:
     assert data["static_findings"][0]["rule"] == "F821"
     assert data["security"]["verdict"] == "ok"
     assert render.to_json(make(summary=f"é{ESC}")).isascii()
+
+
+def sandbox_run(outcome: str = "failed", output: str = "") -> SandboxRun:
+    return SandboxRun.model_validate(
+        {"tool": "pytest", "outcome": outcome, "exit_code": 1, "seconds": 2.5, "output": output}
+    )
+
+
+def test_sandbox_section_shows_the_end_of_failing_output_sanitized() -> None:
+    output = "\n".join(f"line {i}" for i in range(40)) + f"\n{ESC}[2Jboom"
+    report = make(tests_requested=True, sandbox_runs=(sandbox_run(output=output),))
+    text = render.to_text(report)
+    assert "pytest: failed (exit 1, 2.5s)" in text
+    assert "line 39" in text and "line 10" not in text
+    assert ESC not in text
+    assert "output is untrusted" in text
+
+
+def test_passing_runs_hide_their_output() -> None:
+    report = make(tests_requested=True, sandbox_runs=(sandbox_run("passed", "noise"),))
+    assert "noise" not in render.to_text(report)
+
+
+def test_sandbox_note_is_shown_and_in_json() -> None:
+    report = make(tests_requested=True, sandbox_note="tests not run: Docker stopped")
+    assert "tests not run: Docker stopped" in render.to_text(report)
+    data = json.loads(render.to_json(report))
+    note = "tests not run: Docker stopped"
+    assert data["sandbox"] == {"requested": True, "note": note, "runs": []}
+
+
+def test_tests_requested_with_nothing_to_review_exits_0() -> None:
+    report = make("empty", tests_requested=True)
+    assert exit_code(report, block_mode=True, threshold="high") == 0
+
+
+def test_a_block_after_the_review_still_shows_the_review_and_the_tests() -> None:
+    block = Decision.model_validate(
+        {"source": "execution.fingerprint", "verdict": "block", "reasons": ("changed",)}
+    )
+    report = make(
+        "blocked",
+        summary="looks fine",
+        decisions=(block,),
+        tests_requested=True,
+        sandbox_runs=(sandbox_run("passed"),),
+    )
+    text = render.to_text(report)
+    assert "summary: looks fine" in text
+    assert "pytest: passed" in text
+    assert "after the review" in text
+    assert "not sent for review" not in text
+
+
+def test_a_block_before_the_review_says_so() -> None:
+    block = Decision.model_validate({"source": "injection.barrier", "verdict": "block"})
+    text = render.to_text(make("blocked", decisions=(block,)))
+    assert "not sent for review" in text
+    assert "LLM review" not in text
