@@ -26,10 +26,11 @@ from git_reviewer.git.diff import (
     DiffTooLargeError,
     UnmergedPathsError,
     UnsafePathError,
-    collect_range,
-    collect_staged,
 )
 from git_reviewer.git.refs import RefError
+from git_reviewer.git.snapshot import SnapshotError
+from git_reviewer.graph.build import run_review
+from git_reviewer.graph.state import ReviewContext
 from git_reviewer.llm.ollama import (
     CloudModelError,
     ModelMissingError,
@@ -39,7 +40,10 @@ from git_reviewer.llm.ollama import (
     exposure_warnings,
     validate_url,
 )
-from git_reviewer.models import Diff
+from git_reviewer.llm.structured import ChatFn, ollama_chat
+from git_reviewer.report import render
+from git_reviewer.report.model import exit_code
+from git_reviewer.static.tools import StaticAnalysisError
 
 EXIT_OK = 0
 EXIT_FINDINGS = 1
@@ -90,30 +94,41 @@ def review(
         _fail(EXIT_USAGE, "--hook reviews the staged changes; it cannot be combined with --range")
     settings = _settings()
     repo = _repo(hook=hook)
-    limits = DiffLimits(settings.max_diff_bytes, settings.max_files, settings.max_line_chars)
+    reviewer, guardian = _require_ollama(settings)
+    _require_binary("gitleaks", "install it, e.g. brew install gitleaks")
+    context = ReviewContext(
+        repo=repo,
+        hook=hook,
+        # An empty --range is an error (parse_range refuses it), never "review staged".
+        range_spec=range_spec,
+        limits=DiffLimits(settings.max_diff_bytes, settings.max_files, settings.max_line_chars),
+        max_review_chars=settings.max_review_chars,
+        model_context_tokens=settings.model_context_tokens,
+        reviewer=reviewer,
+        guardian=guardian,
+    )
     try:
-        diff = (
-            collect_range(repo, range_spec, limits)
-            if range_spec is not None  # an empty --range is an error, never "review staged"
-            else collect_staged(repo, limits, hook=hook)
-        )
+        report = run_review(context)
     except (RefError, UnmergedPathsError) as exc:
         _fail(EXIT_USAGE, str(exc))
     except (DiffTooLargeError, proc.ProcTimeoutError, proc.OutputTooLargeError) as exc:
         # Resource limits are the only failures warn mode may let through.
         _not_reviewed(str(exc), mode, output_format)
-    except (UnsafePathError, DiffParseError) as exc:
+    except (UnsafePathError, DiffParseError, SnapshotError) as exc:
         # Security controls: never downgraded by warn mode.
         _not_reviewed(str(exc), Mode.block, output_format)
+    except StaticAnalysisError as exc:
+        _fail(EXIT_ENVIRONMENT, f"static analysis failed: {exc}")
     except (DiffError, proc.ProcError) as exc:
         _fail(EXIT_ENVIRONMENT, str(exc))
-    if not diff.files:
-        _emit(output_format, {"status": "empty", "files": []}, "Nothing to review.")
-        raise typer.Exit(EXIT_OK)
-    _require_ollama(settings)
-    # Phase 2 collects the diff but cannot review it yet, so it never reports a pass.
-    _emit(output_format, _summary(diff), _summary_text(diff))
-    raise typer.Exit(EXIT_BLOCKED if mode is Mode.block else EXIT_OK)
+    if output_format is OutputFormat.json:
+        typer.echo(render.to_json(report))
+    else:
+        typer.echo(render.to_text(report))
+    block_mode = mode is Mode.block
+    raise typer.Exit(
+        exit_code(report, block_mode=block_mode, threshold=settings.severity_threshold)
+    )
 
 
 @app.command()
@@ -145,7 +160,7 @@ def doctor() -> None:
     except UnsafeOllamaUrlError as exc:
         failed = True
         _line("FAIL", "ollama url", str(exc))
-    _check_binary("gitleaks", required=False, note="needed from phase 3")
+    failed |= not _check_binary("gitleaks", required=True)
     _check_binary("docker", required=False, note="needed from phase 4")
     raise typer.Exit(EXIT_ENVIRONMENT if failed else EXIT_OK)
 
@@ -203,10 +218,12 @@ def _repo(*, hook: bool) -> Path:
         _fail(EXIT_USAGE if isinstance(exc, GitError) else EXIT_ENVIRONMENT, str(exc))
 
 
-def _require_ollama(settings: Settings) -> None:
+def _require_ollama(settings: Settings) -> tuple[ChatFn, ChatFn]:
+    """Check the endpoint and both models, then return the reviewer and guardian chats."""
     try:
         endpoint = validate_url(settings.ollama_url)
-        check_model(endpoint, settings.reviewer_model, timeout=settings.ollama_timeout_seconds)
+        for model in dict.fromkeys((settings.reviewer_model, settings.guardian_model)):
+            check_model(endpoint, model, timeout=settings.ollama_timeout_seconds)
     except (UnsafeOllamaUrlError, CloudModelError) as exc:
         _fail(EXIT_BLOCKED, str(exc))
     except ModelMissingError as exc:
@@ -216,6 +233,21 @@ def _require_ollama(settings: Settings) -> None:
     # Only once Ollama answered: on an unreachable server the listener check has nothing to see.
     for warning in exposure_warnings(endpoint):
         typer.echo(f"warning: {sanitize.one_line(warning)}", err=True)
+    options = {
+        "timeout": settings.ollama_timeout_seconds,
+        "num_ctx": settings.model_context_tokens,
+    }
+    return (
+        ollama_chat(endpoint, settings.reviewer_model, **options),
+        ollama_chat(endpoint, settings.guardian_model, **options),
+    )
+
+
+def _require_binary(name: str, hint: str) -> None:
+    try:
+        proc.resolve_binary(name)
+    except proc.ProcError as exc:
+        _fail(EXIT_ENVIRONMENT, f"{exc} ({hint})")
 
 
 def _not_reviewed(reason: str, mode: Mode, output_format: OutputFormat) -> NoReturn:
@@ -223,39 +255,6 @@ def _not_reviewed(reason: str, mode: Mode, output_format: OutputFormat) -> NoRet
         typer.echo(json.dumps({"status": "not_reviewed", "reason": reason}, ensure_ascii=True))
     typer.echo(f"Not reviewed: {sanitize.one_line(reason)}", err=True)
     raise typer.Exit(EXIT_BLOCKED if mode is Mode.block else EXIT_OK)
-
-
-def _summary(diff: Diff) -> dict[str, object]:
-    return {
-        "status": "not_reviewed",
-        "mode": diff.mode,
-        "files": [
-            {
-                "path": change.path,
-                "status": change.status,
-                "binary": change.binary,
-                "added_lines": len(change.added_lines),
-            }
-            for change in diff.files
-        ],
-        "reason": "the LLM review arrives in phase 3",
-    }
-
-
-def _summary_text(diff: Diff) -> str:
-    lines = [f"{len(diff.files)} file(s), {diff.added_line_count} added line(s):"]
-    for change in diff.files:
-        detail = "binary, not analyzed" if change.binary else f"+{len(change.added_lines)}"
-        lines.append(f"  {change.status:<12} {sanitize.one_line(change.path)} ({detail})")
-    lines.append("Not reviewed: the LLM review arrives in phase 3.")
-    return "\n".join(lines)
-
-
-def _emit(output_format: OutputFormat, data: dict[str, object], text: str) -> None:
-    if output_format is OutputFormat.json:
-        typer.echo(json.dumps(data, ensure_ascii=True))
-    else:
-        typer.echo(text)
 
 
 def _check_git() -> bool:

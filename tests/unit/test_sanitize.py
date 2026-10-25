@@ -52,3 +52,7 @@ def test_invisible_and_unassigned_characters_are_escaped(code: int) -> None:
 def test_decomposed_accents_are_kept() -> None:
     decomposed = "cafe" + chr(0x0301)
     assert for_terminal(decomposed) == decomposed
+
+
+def test_lone_surrogates_are_escaped() -> None:
+    assert for_terminal("a" + chr(0xD800) + "b") == "a<U+D800>b"

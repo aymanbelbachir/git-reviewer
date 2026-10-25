@@ -1,0 +1,84 @@
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from git_reviewer.models import Decision, ReviewFinding, StaticFinding
+from git_reviewer.report import render
+from git_reviewer.report.model import Report, exit_code
+
+ESC = chr(0x1B)
+
+
+def make(status: str = "reviewed", severity: str | None = None, **extra: object) -> Report:
+    findings = ()
+    if severity:
+        findings = (
+            StaticFinding.model_validate(
+                {
+                    "tool": "ruff",
+                    "rule": "F821",
+                    "file": "a.py",
+                    "line": 1,
+                    "severity": severity,
+                    "message": "undefined",
+                }
+            ),
+        )
+    fields: dict[str, object] = {
+        "status": status,
+        "mode": "staged",
+        "files": (),
+        "static_findings": findings,
+        "review_findings": (),
+        "summary": "",
+        "decisions": (),
+        "notes": (),
+        "reason": None,
+    }
+    fields.update(extra)
+    return Report.model_validate(fields)
+
+
+@pytest.mark.parametrize(
+    ("status", "severity", "block_mode", "expected"),
+    [
+        ("blocked", None, False, 2),
+        ("blocked", None, True, 2),
+        ("not_reviewed", None, True, 2),
+        ("not_reviewed", None, False, 0),
+        ("reviewed", "high", True, 1),
+        ("reviewed", "high", False, 0),
+        ("reviewed", "medium", True, 0),
+        ("reviewed", None, True, 0),
+        ("empty", None, True, 0),
+    ],
+)
+def test_exit_codes(status: str, severity: str | None, block_mode: bool, expected: int) -> None:
+    assert exit_code(make(status, severity), block_mode=block_mode, threshold="high") == expected
+
+
+def test_model_text_is_sanitized_in_the_terminal() -> None:
+    finding = ReviewFinding.model_validate(
+        {
+            "file": "a.py",
+            "line": 1,
+            "severity": "low",
+            "category": "bug",
+            "title": f"x{ESC}]52;c;ZXZpbA=={chr(7)}",
+            "explanation": f"see {chr(0x202E)}txt.exe",
+        }
+    )
+    decision = Decision(source="injection.agent", verdict="suspect", reasons=(f"r{ESC}[2J",))
+    text = render.to_text(make(review_findings=(finding,), decisions=(decision,)))
+    assert ESC not in text and chr(0x202E) not in text
+    assert "<U+001B>" in text and "<U+202E>" in text
+
+
+def test_json_is_ascii_and_complete() -> None:
+    data = json.loads(render.to_json(make(severity="high")))
+    assert data["status"] == "reviewed"
+    assert data["static_findings"][0]["rule"] == "F821"
+    assert data["security"]["verdict"] == "ok"
+    assert render.to_json(make(summary=f"é{ESC}")).isascii()

@@ -40,6 +40,7 @@ def test_xdg_config_home_is_used(tmp_path: Path) -> None:
         "max_files = 100000\n",
         "max_diff_bytes = 999999999\n",
         "ollama_timeout_seconds = 0\n",
+        "model_context_tokens = 4096\n",
         'severity_threshold = "none"\n',
         'reviewer_model = "bad model; rm -rf"\n',
         "unknown_key = 1\n",
@@ -69,3 +70,10 @@ def test_non_utf8_config_is_a_config_error(tmp_path: Path) -> None:
     file.chmod(0o600)
     with pytest.raises(ConfigError):
         load_settings(environ={}, path=file)
+
+
+@pytest.mark.parametrize("value", [".", "config", "../x", ""])
+def test_relative_xdg_config_home_is_ignored(value: str) -> None:
+    assert (
+        config_path({"XDG_CONFIG_HOME": value}) == Path.home() / ".config/git-reviewer/config.toml"
+    )

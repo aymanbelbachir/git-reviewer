@@ -11,9 +11,19 @@ from typer.testing import CliRunner
 from git_reviewer import cli, proc
 from git_reviewer.git.diff import DiffError
 from git_reviewer.llm.ollama import CloudModelError, ModelMissingError, OllamaUnreachableError
-from tests.helpers import git, write_files
+from tests.helpers import FakeLLM, git, reviewer_json, write_files
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def fake_ollama(monkeypatch: pytest.MonkeyPatch) -> FakeLLM:
+    """No CLI test talks to Ollama: model checks pass and both chats are a fake model."""
+    llm = FakeLLM()
+    monkeypatch.setattr(cli, "check_model", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "exposure_warnings", lambda endpoint: [])
+    monkeypatch.setattr(cli, "ollama_chat", lambda *args, **kwargs: llm)
+    return llm
 
 
 @pytest.fixture
@@ -30,19 +40,32 @@ def staged_repo(
     return repo
 
 
-def test_review_lists_staged_files_but_never_claims_a_pass(staged_repo: Path) -> None:
-    block = runner.invoke(cli.app, ["review"])
-    warn = runner.invoke(cli.app, ["review", "--mode", "warn"])
-    assert "app.py" in block.output
-    assert "Not reviewed" in block.output
-    assert block.exit_code == cli.EXIT_BLOCKED
-    assert warn.exit_code == cli.EXIT_OK
+def test_review_exit_codes_follow_findings_and_mode(
+    staged_repo: Path, fake_ollama: FakeLLM
+) -> None:
+    clean = runner.invoke(cli.app, ["review"])
+    assert clean.exit_code == cli.EXIT_OK
+    assert "app.py" in clean.output and "Reviewed." in clean.output
+    fake_ollama.reviewer_answer = reviewer_json(
+        [
+            {
+                "file": "app.py",
+                "line": 1,
+                "severity": "high",
+                "category": "bug",
+                "title": "Bug",
+                "explanation": "Broken.",
+            }
+        ]
+    )
+    assert runner.invoke(cli.app, ["review"]).exit_code == cli.EXIT_FINDINGS
+    assert runner.invoke(cli.app, ["review", "--mode", "warn"]).exit_code == cli.EXIT_OK
 
 
 def test_review_json_output(staged_repo: Path) -> None:
     result = runner.invoke(cli.app, ["review", "--format", "json"])
-    data = json.loads(result.output)
-    assert data["status"] == "not_reviewed"
+    data = json.loads(result.stdout)
+    assert data["status"] == "reviewed"
     assert data["files"][0]["path"] == "app.py"
 
 
@@ -163,7 +186,7 @@ def test_git_timeout_is_not_reviewed(staged_repo: Path, monkeypatch: pytest.Monk
     def slow(*args: object, **kwargs: object) -> None:
         raise proc.ProcTimeoutError("process exceeded 60s")
 
-    monkeypatch.setattr(cli, "collect_staged", slow)
+    monkeypatch.setattr(cli, "run_review", slow)
     result = runner.invoke(cli.app, ["review", "--format", "json"])
     assert result.exit_code == cli.EXIT_BLOCKED
     assert json.loads(result.stdout)["status"] == "not_reviewed"
@@ -175,7 +198,7 @@ def test_git_failure_is_an_environment_error(
     def broken(*args: object, **kwargs: object) -> None:
         raise DiffError("git diff failed: fatal: bad object")
 
-    monkeypatch.setattr(cli, "collect_staged", broken)
+    monkeypatch.setattr(cli, "run_review", broken)
     result = runner.invoke(cli.app, ["review", "--mode", "warn"])
     assert result.exit_code == cli.EXIT_ENVIRONMENT
 
@@ -186,7 +209,7 @@ def test_unexpected_crash_never_exits_0_or_1(
     def crash(*args: object, **kwargs: object) -> None:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(cli, "collect_staged", crash)
+    monkeypatch.setattr(cli, "run_review", crash)
     monkeypatch.setattr(sys, "argv", ["git-reviewer", "review", "--mode", "warn"])
     with pytest.raises(SystemExit) as exit_info:
         cli.main()

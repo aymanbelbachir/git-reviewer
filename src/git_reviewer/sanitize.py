@@ -1,4 +1,4 @@
-"""Make untrusted text safe to print (docs/ARCHITECTURE.md §6.4; SECURITY.md T-06, T-07).
+"""Make untrusted text safe to print (docs/ARCHITECTURE.md §6.5; SECURITY.md T-06, T-07).
 
 File names, diff content and model output can carry terminal escape sequences (clipboard writes,
 hidden text, fake links) or bidi and invisible characters that reorder or hide text. Control and
@@ -11,7 +11,7 @@ from __future__ import annotations
 import unicodedata
 
 _KEPT_CONTROLS = frozenset({"\n", "\t"})
-_ESCAPED_CATEGORIES = frozenset({"Cc", "Cf", "Co", "Cn", "Zl", "Zp"})
+_ESCAPED_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
 # Invisible or blank characters outside the categories above: tag characters (ASCII smuggling),
 # variation selectors (hidden-byte "emoji smuggling"), the combining grapheme joiner, Hangul
 # fillers and the blank Braille pattern.
@@ -53,3 +53,16 @@ def one_line(text: str, *, max_chars: int = 300) -> str:
 
 def _is_invisible(code: int) -> bool:
     return any(code in block for block in _INVISIBLE_RANGES)
+
+
+_MASK = "[secret masked]"
+_MIN_SECRET_CHARS = 4
+
+
+def mask_secrets(text: str, secrets: tuple[str, ...]) -> str:
+    """Replace every exact occurrence of a known secret value (SECURITY.md T-26). A model that
+    paraphrases or splits a secret defeats exact matching: that residual risk is documented."""
+    for secret in sorted(secrets, key=len, reverse=True):
+        if len(secret) >= _MIN_SECRET_CHARS:
+            text = text.replace(secret, _MASK)
+    return text

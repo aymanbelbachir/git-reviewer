@@ -37,7 +37,7 @@ _STATUS: dict[str, FileStatus] = {
     "D": "deleted",
     "T": "type_changed",
 }
-_HUNK_HEADER = re.compile(r"@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+_HUNK_HEADER = re.compile(r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _OCTAL_ESCAPE = re.compile(r"\\([0-7]{3})")
 # The escapes git's quote_c_style writes, besides octal.
 _SIMPLE_ESCAPES = {
@@ -51,6 +51,25 @@ _SIMPLE_ESCAPES = {
     "\\f": "\f",
     "\\r": "\r",
 }
+
+
+@dataclass(frozen=True)
+class PatchLine:
+    """One line of the patch. `line` is the new-file number for added and context lines, and the
+    old-file number for removed lines."""
+
+    path: str
+    kind: Literal["+", "-", " "]
+    line: int
+    text: str
+
+
+@dataclass(frozen=True)
+class _Section:
+    path: str
+    binary: bool
+    added: set[int]
+    lines: list[PatchLine]
 
 
 @dataclass(frozen=True)
@@ -160,7 +179,8 @@ def _parse_patch(
     files: dict[str, tuple[bool, set[int]]] = {}
     merged: set[str] = set()
     for section in _sections(patch):
-        path, binary, lines = _parse_section(section, limits)
+        parsed = _parse_section(section, limits)
+        path, binary, lines = parsed.path, parsed.binary, parsed.added
         if path not in files:
             files[path] = (binary, lines)
             continue
@@ -186,13 +206,14 @@ def _sections(patch: str) -> list[list[str]]:
     return sections
 
 
-def _parse_section(section: list[str], limits: DiffLimits) -> tuple[str, bool, set[int]]:
+def _parse_section(section: list[str], limits: DiffLimits) -> _Section:
     """Parse one file's patch. Hunk line counts are checked against their headers, so a
     misnumbered line (which would misplace findings, T-05) stops the review instead."""
     old_path = new_path = None
     binary = False
     added: set[int] = set()
-    line_number = old_left = new_left = 0
+    records: list[tuple[Literal["+", "-", " "], int, str]] = []
+    line_number = old_number = old_left = new_left = 0
     in_hunks = False
     for line in section[1:]:
         if old_left or new_left:
@@ -205,12 +226,17 @@ def _parse_section(section: list[str], limits: DiffLimits) -> tuple[str, bool, s
                         f"a line is longer than {limits.max_line_chars} characters"
                     )
                 added.add(line_number)
+                records.append(("+", line_number, line[1:]))
                 line_number += 1
                 new_left -= 1
             elif marker == "-":
+                records.append(("-", old_number, line[1:]))
+                old_number += 1
                 old_left -= 1
             elif marker == " ":
+                records.append((" ", line_number, line[1:]))
                 line_number += 1
+                old_number += 1
                 old_left -= 1
                 new_left -= 1
             else:
@@ -221,9 +247,10 @@ def _parse_section(section: list[str], limits: DiffLimits) -> tuple[str, bool, s
             match = _HUNK_HEADER.match(line)
             if match is None:
                 raise DiffParseError("malformed hunk header")
-            old_left = int(match.group(1) or "1")
-            line_number = int(match.group(2))
-            new_left = int(match.group(3) or "1")
+            old_number = int(match.group(1))
+            old_left = int(match.group(2) or "1")
+            line_number = int(match.group(3))
+            new_left = int(match.group(4) or "1")
             in_hunks = True
         elif line.startswith("\\") or (in_hunks and line == ""):
             continue  # "\ No newline" after a hunk's last line, or the patch's final newline
@@ -238,7 +265,47 @@ def _parse_section(section: list[str], limits: DiffLimits) -> tuple[str, bool, s
     if old_left or new_left:
         raise DiffParseError("a hunk is shorter than its header says")
     path = new_path or old_path or _path_from_git_header(section[0])
-    return path, binary, added
+    lines = [PatchLine(path, kind, number, text) for kind, number, text in records]
+    return _Section(path=path, binary=binary, added=added, lines=lines)
+
+
+def patch_lines(diff: Diff) -> list[PatchLine]:
+    """Every line of the (already validated) patch, with its file and line number."""
+    limits = DiffLimits(
+        max_bytes=len(diff.patch) + 1,
+        max_files=len(diff.files) + 1,
+        max_line_chars=len(diff.patch) + 1,
+    )
+    return [
+        line for section in _sections(diff.patch) for line in _parse_section(section, limits).lines
+    ]
+
+
+def numbered_view(diff: Diff) -> str:
+    """The diff as shown to a model: one block per file, every line with its explicit number.
+
+    Added lines read `  12 + code`, context lines `  13 | code`, removed lines `     - code`. A
+    small model gets line numbers right from this far more reliably than from hunk headers.
+    """
+    by_path: dict[str, list[PatchLine]] = {}
+    for line in patch_lines(diff):
+        by_path.setdefault(line.path, []).append(line)
+    blocks: list[str] = []
+    for change in diff.files:
+        header = f"=== FILE: {change.path} ({change.status}) ==="
+        if change.binary:
+            blocks.append(f"{header}\n(binary file, content not shown)")
+            continue
+        rows = [header]
+        for line in by_path.get(change.path, []):
+            if line.kind == "+":
+                rows.append(f"{line.line:>6} + {line.text}")
+            elif line.kind == " ":
+                rows.append(f"{line.line:>6} | {line.text}")
+            else:
+                rows.append(f"{'':>6} - {line.text}")
+        blocks.append("\n".join(rows))
+    return "\n\n".join(blocks)
 
 
 def _header_path(value: str, prefix: str) -> str | None:

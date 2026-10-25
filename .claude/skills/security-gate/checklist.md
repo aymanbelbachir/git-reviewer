@@ -17,11 +17,18 @@ SECURITY.md; section numbers to docs/ARCHITECTURE.md. The phase in brackets is w
 - R2.5 Graph routing reads typed state only; no model text decides what runs.
 - R2.6 Findings whose file/line is not in the diff are dropped and raise an alert, with a test.
 - R2.7 Untrusted text is sanitized before display (control, ANSI/OSC, bidi characters), with a test.
-- R2.8 Static tools ignore repository config and suppressions: ruff `--isolated --ignore-noqa`, bandit
-  with our config and `--ignore-nosec`, gitleaks with `--config <ours>`, an empty ignore path and
-  `--ignore-gitleaks-allow`; newly added suppression markers are reported. With tests (T-08).
-- R2.9 Over a size limit the status is "not reviewed" (never silent truncation); binary files are
-  listed as "not analyzed". With tests (T-35, T-36).
+- R2.8 Static tools ignore repository config, suppressions and default excludes (files passed
+  explicitly, git paths literal): ruff `--isolated --ignore-noqa`, bandit
+  with our config, `--ignore-nosec` and an empty `--exclude=`, gitleaks with `--config <ours>` (no
+  default path allowlist), an empty ignore path and `--ignore-gitleaks-allow`; the branch's
+  `.gitleaksignore` is never exported; newly added suppression markers are reported; a scanner
+  with no JSON output or a file it silently skipped is a failure. With tests (T-08).
+- R2.9 Over a size limit the status is "not reviewed" (never silent truncation, including the
+  guardian's input and the model's context window); executable binaries block, other binaries
+  and unparsable files mean "not reviewed". With tests (T-35, T-36).
+- R2.10 Only model failures and invalid output mean "not reviewed"; any other exception crashes
+  (exit 2), never exit 0 in warn mode. A model answer cut off (`done_reason` not `stop`) or a
+  prompt that overflowed the context is invalid output. With tests.
 
 ## R3. Sandboxed execution [phase 4]
 - R3.1 The docker argv contains `--network=none`, asserted by the policy check, with a test.
@@ -109,11 +116,15 @@ SECURITY.md; section numbers to docs/ARCHITECTURE.md. The phase in brackets is w
 - G0.6 Every decision is logged without code or secrets and shown in the security report.
 
 ## G1. Anti-injection guardian [phase 3]
-- G1.1 Barrier: bidi, invisible and Unicode tag characters detected (block).
-- G1.2 Barrier: long base64/hex strings detected, decoded content re-scanned.
-- G1.3 Barrier: AI-addressed phrases detected after normalization, English and French at least.
-- G1.4 Agent classifies suspicious passages and returns line references.
-- G1.5 Canary token in the reviewer system prompt; its presence in the output blocks.
+- G1.1 Barrier: bidi and Unicode tag characters and a carriage return inside a line block;
+  other invisible characters are suspect.
+- G1.2 Barrier: long base64/hex strings that decode to readable text flagged, decoded text re-scanned.
+- G1.3 Barrier: AI-addressed phrases detected after normalization, English and French at least,
+  including instructions split across lines and imitations of the data delimiters.
+- G1.4 Agent classifies suspicious passages and returns line references. It sees every flagged
+  passage (in batches); what it cannot see whole blocks.
+- G1.5 Canary token in the reviewer system prompt; its presence in the output blocks, also when
+  JSON-escaped, re-cased, split by punctuation or written in fullwidth letters.
 - G1.6 Cross-check: a static finding ignored or downgraded by the reviewer raises a probable-injection alert.
 
 ## G2. Execution guardian [phase 4]

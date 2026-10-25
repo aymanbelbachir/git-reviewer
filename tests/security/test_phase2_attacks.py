@@ -262,3 +262,19 @@ def test_refs_reach_git_only_after_end_of_options(
         if args[0] in {"diff", "merge-base"}:
             revisions = [a for a in args[1:] if not a.startswith("-")]
             assert all(object_id.fullmatch(a) for a in revisions), args
+
+
+def test_bare_repository_committed_inside_the_repo_is_ignored(
+    make_repo: Callable[..., Path], tmp_path: Path
+) -> None:
+    from git_reviewer.git.command import GitError, repo_root
+
+    marker = tmp_path / "fsmonitor-ran"
+    repo = make_repo()
+    bare = repo / "trap"
+    bare.mkdir()
+    git(bare, "init", "-q", "--bare")
+    git(bare, "config", "core.fsmonitor", f"touch {marker}")
+    with pytest.raises(GitError, match=r"safe\.bareRepository"):
+        repo_root(bare)
+    assert not marker.exists()

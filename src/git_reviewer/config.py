@@ -39,11 +39,19 @@ class Settings(BaseModel):
     max_diff_bytes: int = Field(default=1024 * 1024, ge=1024, le=5 * 1024 * 1024)
     max_files: int = Field(default=200, ge=1, le=1000)
     max_line_chars: int = Field(default=10_000, ge=100, le=100_000)
+    # What the model is shown: the numbered diff and static findings must fit its context.
+    max_review_chars: int = Field(default=60_000, ge=1_000, le=200_000)
+    # At least twice the 4096 tokens reserved for the model's answer.
+    model_context_tokens: int = Field(default=32_768, ge=8_192, le=131_072)
     severity_threshold: Severity = "high"
 
 
 def config_path(environ: Mapping[str, str] = os.environ) -> Path:
-    base = environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    # The XDG spec says to ignore a relative XDG_CONFIG_HOME. Honouring it would read the
+    # config from the current directory, which may be the reviewed repository (T-27).
+    base = environ.get("XDG_CONFIG_HOME", "")
+    if not Path(base).is_absolute():
+        base = str(Path.home() / ".config")
     return Path(base) / "git-reviewer" / "config.toml"
 
 

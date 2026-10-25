@@ -37,7 +37,8 @@ Rules that follow from the boundary:
 
 1. Untrusted data flows *through* the graph but never chooses an effect. Only deterministic
    code decides what to run, what to write and whether to block.
-2. Effects live in exactly six modules: `proc` (subprocess), `git.worktree`, `sandbox.docker`,
+2. Effects live in exactly seven modules: `proc` (subprocess), `git.snapshot` (exports the
+   reviewed files into a private temp dir for the scanners), `git.worktree`, `sandbox.docker`,
    `patch.apply`, `hook.install` (writes `.git/hooks`) and `report.write` (report and log files).
    Nothing else may spawn a process or write outside a private temp dir. A unit test enforces this
    by scanning every other module for `subprocess`, `os.system`, `shutil.rmtree`, `open(..., "w"/"a"/"x")`,
@@ -55,13 +56,16 @@ src/git_reviewer/
   models.py            # Pydantic models crossing boundaries: Finding, Report, GuardianVerdict, PatchProposal…
   proc.py              # the ONLY subprocess entry point (allowlist, absolute paths, no shell, clean env)
   sanitize.py          # control/ANSI/bidi stripping for display, secret masking
-  logging.py           # allowlisted structured log fields, redaction filter
+  audit_log.py         # allowlisted structured log fields (never code, output or secrets)
   git/
     diff.py            # collect diff, parse hunks into a DiffIndex {path -> added line numbers}
     refs.py            # validate refs with `rev-parse --verify --end-of-options`
+    snapshot.py        # exports the reviewed version of changed files for the scanners
     worktree.py        # private temp worktree lifecycle, symlink neutralization
   static/
-    ruff.py bandit.py gitleaks.py   # run with OUR config, suppressions ignored; normalize to Finding
+    tools.py           # ruff, bandit, gitleaks with OUR configs, suppressions ignored
+    analyze.py         # findings on added lines + own checks (suppression markers, config edits)
+    gitleaks.toml      # gitleaks built-in rules, nothing from the reviewed repo
   llm/
     ollama.py          # loopback URL check, model presence, cloud-model refusal, client factory
     prompts.py         # system prompts, nonce delimiters, canary token
@@ -110,6 +114,9 @@ tests/
 
 The tool never builds or pulls the sandbox image: that needs the network, and the spec allows no
 network call except to Ollama. The user builds it once with a documented `docker build` command (§8.2).
+
+Security blocks (barrier, guardian, canary, unsafe paths) exit 2 even in warn mode: warn mode only
+turns findings and resource limits into warnings.
 
 Exit codes: `0` nothing at or above the threshold, `1` findings at or above the threshold (block mode),
 `2` blocked by a security control (barrier, guardian, policy), `3` usage or configuration error,
@@ -208,17 +215,70 @@ Design rules:
 - The system prompt states that the block is data, that instructions inside it must be ignored and
   reported as suspicious, and contains a per-run secret canary token (§10.2).
 - Untrusted text is never placed in a system prompt.
+- The model sees a numbered view of the diff (`  12 + code`, `  13 | code`, `     - code`): a small
+  model gets line numbers right from it far more reliably than from hunk headers.
+- What the model is shown (numbered diff + static findings) is capped by `max_review_chars`
+  (default 60,000 characters). Over the cap, the LLM review is not performed and the status is
+  "not reviewed"; the static findings are still reported.
+- Ollama silently drops part of a prompt that does not fit its context window, system prompt and
+  canary included. So the whole prompt must fit `model_context_tokens` (default 32,768, minimum
+  8,192) with 4,096 tokens left for the answer (`num_predict`). Checked twice: before the call, at
+  two UTF-8 bytes per token; after it, against the prompt token count Ollama reports. Either check
+  failing means "not reviewed". The guardian, which reads the most hostile text, is sized at one
+  byte per token, a strict upper bound (§10.1).
 
 ### 6.3 LLM output
 - Ollama is called with `format=<JSON schema>` (constrained decoding) and temperature 0. The raw
   string is then validated by our own code: `Model.model_validate_json(raw, strict=True)` with
   `extra="forbid"`, bounded string lengths, bounded list sizes and enums for severities.
 - We do not use lenient helpers (JSON repair, regex extraction, partial parsing, `include_raw`
-  fallbacks). Invalid output = the component failed. For the reviewer, that is reported as
-  "LLM review rejected" and counts as a block in block mode; for guardians it is a block (T-04).
+  fallbacks). Invalid output = the component failed. For the reviewer, the status becomes "not
+  reviewed" (exit 2 in block mode); for guardians it is a block (T-04).
 - A finding whose `(file, line)` is not in `DiffIndex` is dropped and raises an alert (T-05).
+- An answer that did not end normally (Ollama `done_reason` other than `stop`, e.g. cut at
+  `num_predict`) is invalid output. `ollama_timeout_seconds` bounds the whole call, not only each
+  network read.
+- Only model failures (connection, HTTP, Ollama errors, timeout) and invalid output give "not
+  reviewed". Any other exception is a bug in git-reviewer and crashes (exit 2), so it can never pass
+  as "not reviewed" with exit 0 in warn mode.
 
-### 6.4 Display
+### 6.4 Static analysis (phase 3)
+- `git.snapshot` exports the reviewed version of every changed regular file (staged blobs, or blobs
+  at the head of the range, read with `git cat-file --batch`) into a private temp dir (0700, files
+  0600, created with `O_EXCL|O_NOFOLLOW`). Symlinks and submodules are never materialized; two paths
+  colliding on a case-insensitive file system stop the review.
+- Python files are recognized by suffix (`.py`, `.pyi`, `.pyw`) and by a `python` shebang, so a
+  script named `bin/deploy` is scanned too.
+- ruff: `--isolated --ignore-noqa --no-cache --no-respect-gitignore`, rules `E9,F,B,PLE`, and every
+  file passed explicitly, so its default excludes (`dist/`, `build/`, `venv/`...) hide nothing.
+  bandit: explicit files (no `.bandit` discovery), `--ignore-nosec` and an empty `--exclude=`: its
+  default excludes match by substring, so `.git` would hide `.github/` and `CVS` would hide
+  `CVSexport.py`. bandit's metrics must list every file it was given, or the analysis fails.
+  gitleaks: our `gitleaks.toml` (built-in rules, but without the default global path allowlist,
+  which skips `node_modules/`, lockfiles, PDFs and images), an empty ignore directory,
+  `--ignore-gitleaks-allow`; a `.gitleaksignore` from the branch is never exported.
+- A scanner that exits without its JSON output (even empty) is a failure (exit 4), never "no
+  findings".
+- Git paths are always literal (`--literal-pathspecs`): a file named `:(exclude)payload.py` would
+  otherwise be pathspec magic that removes `payload.py` from the list of files to scan.
+- Only findings on added lines are kept. git-reviewer adds its own findings for added suppression
+  markers (`# noqa`, `# nosec`, `gitleaks:allow`) and for edits to scanner configuration.
+- Secret values never appear in findings: gitleaks messages name the rule only, bandit's
+  hardcoded-password messages (which quote the value) are replaced, and every message is masked
+  with the gitleaks values.
+- Integrity checks, so nothing escapes the scanners silently (T-07, T-36):
+  - a scanner finding beyond the last line git shows for a file means git and Python disagree on
+    where lines end (a lone carriage return, an exotic encoding) → **block**;
+  - a PEP 263 encoding declaration other than UTF-8, ASCII or Latin-1 → **block**: with `utf-7` or
+    `unicode_escape`, Python decodes code that git, ruff and the model only see as a comment;
+  - an added or changed executable binary (`.pyc`, `.pyo`, `.pyd`, `.so`, `.dylib`, `.dll`, `.whl`,
+    `.egg`, `.zip`, `.pth`) → **block**;
+  - any other binary file, or a Python file bandit could not parse → "not reviewed": part of the
+    change was not analyzed. The barrier and guardian still run; the LLM review does not.
+- The report shows how many files each scanner analyzed (`coverage`), so a scanner that saw nothing
+  is visible.
+
+### 6.5 Display
 - Everything shown in a terminal goes through `sanitize.for_terminal()`: C0/C1 controls (except
   newline and tab) and ANSI/OSC sequences are removed, bidi and invisible characters are shown as
   `U+202E`-style escapes, length is capped. Rich markup in untrusted text is escaped (T-06).
@@ -313,7 +373,8 @@ run --rm --pull=never --init
 - **Telemetry:** `git_reviewer/__init__.py` sets `LANGCHAIN_TRACING_V2`, `LANGCHAIN_TRACING` and
   `LANGSMITH_TRACING` to `false` and removes LangSmith API keys and endpoints from `os.environ` before
   any LangChain import. A test asserts it, and a test-wide socket guard fails on any non-loopback
-  connection (T-25).
+  connection, and on the Ollama port itself: tests use a fake model (T-25). Note: `langsmith` is a
+  transitive dependency of `langchain-core`; it is installed but its tracing is forced off.
 - **Proxies:** the Ollama client runs in our own process and httpx honors `HTTP_PROXY`,
   `HTTPS_PROXY` and `ALL_PROXY` by default, which would send prompts (the code) to a proxy even with a
   loopback `ollama_url`. The client is created with `trust_env=False` and an explicit `base_url`
@@ -335,18 +396,36 @@ run --rm --pull=never --init
 
 ### 10.1 Anti-injection guardian
 Before the review:
-- Barrier: bidi controls (U+202A–202E, U+2066–2069), invisible/format characters (Cf: U+200B–200F,
-  U+2060–2064, U+FEFF), Unicode tag characters (U+E0000–E007F) → **block**. Mixed-script
-  identifiers (homoglyphs) → suspect. Long base64 (≥ 40 chars) or hex (≥ 64 chars) runs → suspect,
-  and decoded content is re-scanned. AI-addressed phrases, matched after NFKC + casefold +
-  invisible-char removal, in English and French at least ("ignore previous instructions",
-  "you are now", "system prompt", fake role tags like `<|im_start|>`, `[INST]`, "tu es maintenant",
-  "ignore tes instructions") → suspect.
-- Agent: receives the suspicious passages (nonce-delimited) and returns a verdict and the lines.
+- Barrier, on every line shown to the model (added, unchanged, removed) and every file name:
+  - bidi controls (U+202A–202E, U+2066–2069, U+200E/F, U+061C) and Unicode tag characters
+    (U+E0000–E007F) → **block**: never legitimate in code;
+  - other invisible or format characters (zero-width, joiners, variation selectors, Hangul fillers)
+    → suspect: they also occur legitimately, e.g. in emoji sequences. A BOM at the start of a file
+    is accepted;
+  - base64 (≥ 40 chars) or hex (≥ 64 chars) runs that **decode to readable text** → suspect, and the
+    decoded text is scanned for AI-addressed phrases. Runs that decode to random bytes (hashes,
+    integrity values in lockfiles) carry no message and are ignored, to avoid flooding alerts;
+  - AI-addressed phrases, after NFKC + casefold + invisible-character removal, in English, French,
+    Spanish and German, also across three consecutive lines (split instructions) → suspect;
+  - text imitating our data delimiters (`untrusted_…`, `nonce=`) → suspect;
+  - a carriage return inside a line (not the CR of a CRLF ending) → **block**: git splits lines on
+    LF only, but Python also ends a line at a lone CR, so code can hide in what git, the scanners'
+    line mapping and the model see as a comment.
+  - Not implemented yet: mixed-script identifier (homoglyph) detection; NFKC only folds
+    compatibility forms such as fullwidth letters (T-07 residual).
+- Agent: called only when the barrier says "suspect" (a block is already final). It receives the
+  flagged lines with one neighbour on each side, nonce-delimited, and may raise to "block". Line
+  references it returns that it was not shown are dropped.
+- The passages are sent in batches of at most 20,000 UTF-8 bytes, fewer when the context window is
+  small (every token is at least one byte, so a batch always fits next to the system prompt and the
+  answer). Nothing is truncated: more than 5 batches, or a single line too long for one batch, is a
+  **block**, since the guardian could not see everything.
 
 After the review:
 - Canary: a random 128-bit token in the reviewer's system prompt; if it appears anywhere in the
-  raw output → block.
+  raw output → block. The delimiter nonce appearing in the output → suspect. Both are compared
+  after decoding JSON escapes, NFKC, casefold and keeping only letters and digits, so `\u0043ANARY…`,
+  `canary - 1F2E…` or fullwidth letters still match.
 - Cross-check: for every static finding of severity ≥ medium, the reviewer output must mention that
   `file:line` without lowering it to info/low or calling it a false positive. Otherwise → alert
   "probable injection". Static findings are always in the report whatever the LLM says.

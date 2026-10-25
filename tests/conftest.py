@@ -12,6 +12,7 @@ import pytest
 
 from tests.helpers import git, write_files
 
+OLLAMA_PORT = 11434
 _real_connect = socket.socket.connect
 _real_connect_ex = socket.socket.connect_ex
 
@@ -26,6 +27,9 @@ def _check_address(sock: socket.socket, address: Any) -> None:
         loopback = False
     if not loopback:
         raise RuntimeError(f"network access blocked in tests: {address!r}")
+    # Tests must never depend on a local Ollama by accident: they use a fake model.
+    if isinstance(address, tuple) and len(address) >= 2 and address[1] == OLLAMA_PORT:
+        raise RuntimeError("connection to Ollama blocked in tests: use tests.helpers.FakeLLM")
 
 
 def _guarded_connect(self: socket.socket, address: Any) -> None:

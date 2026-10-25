@@ -12,6 +12,7 @@ SUBPROCESS_MODULES = {"proc.py"}
 EFFECT_MODULES = {
     "proc.py",
     "git/worktree.py",
+    "git/snapshot.py",
     "sandbox/docker.py",
     "patch/apply.py",
     "hook/install.py",

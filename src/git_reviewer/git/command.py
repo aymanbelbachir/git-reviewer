@@ -18,10 +18,14 @@ from pathlib import Path
 from git_reviewer import proc, sanitize
 
 HARDENING_CONFIG: tuple[str, ...] = (
+    # File names are never patterns: a file called "*.py" must not match every Python file.
+    "--literal-pathspecs",
     "-c", "core.hooksPath=/dev/null",
     "-c", "core.fsmonitor=false",
     "-c", "core.quotePath=true",
     "-c", "diff.suppressBlankEmpty=false",
+    # Never pick up a bare repository committed inside the reviewed one.
+    "-c", "safe.bareRepository=explicit",
     "-c", "color.ui=false",
 )  # fmt: skip
 HARDENING_ENV: dict[str, str] = {
@@ -58,9 +62,17 @@ def run_git(
     hook: bool = False,
     timeout: float = proc.DEFAULT_TIMEOUT_SECONDS,
     max_output: int = proc.DEFAULT_MAX_OUTPUT_BYTES,
+    stdin: bytes | None = None,
 ) -> proc.Result:
     attr_source = ("--attr-source", _empty_tree(repo, hook))
-    return _run(repo, [*attr_source, *args], hook=hook, timeout=timeout, max_output=max_output)
+    return _run(
+        repo,
+        [*attr_source, *args],
+        hook=hook,
+        timeout=timeout,
+        max_output=max_output,
+        stdin=stdin,
+    )
 
 
 def repo_root(start: Path, *, hook: bool = False) -> Path:
@@ -93,6 +105,7 @@ def _run(
     hook: bool,
     timeout: float = proc.DEFAULT_TIMEOUT_SECONDS,
     max_output: int = proc.DEFAULT_MAX_OUTPUT_BYTES,
+    stdin: bytes | None = None,
 ) -> proc.Result:
     env = dict(HARDENING_ENV)
     if hook:
@@ -104,5 +117,6 @@ def _run(
         timeout=timeout,
         env_extra=env,
         max_output=max_output,
+        stdin=stdin,
         forbidden_root=repo,
     )
