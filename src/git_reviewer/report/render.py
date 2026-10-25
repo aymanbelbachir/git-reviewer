@@ -7,7 +7,14 @@ from typing import Any
 
 from git_reviewer import sanitize
 from git_reviewer.guardians.base import worst
-from git_reviewer.models import SEVERITY_RANK, Decision, ReviewFinding, SandboxRun, StaticFinding
+from git_reviewer.models import (
+    SEVERITY_RANK,
+    Decision,
+    FixProposal,
+    ReviewFinding,
+    SandboxRun,
+    StaticFinding,
+)
 
 from .model import Report
 
@@ -55,6 +62,9 @@ def to_text(report: Report) -> str:
             out.append(f"  {sanitize.one_line(report.sandbox_note)}")
         for run in report.sandbox_runs:
             out.extend(_sandbox_lines(run))
+    if report.fix_requested and report.status == "reviewed":
+        out.append("")
+        out.extend(_fix_lines(report))
     out.append("")
     out.append("Security report:")
     out.extend(_decision_lines(report.decisions))
@@ -108,6 +118,13 @@ def to_json(report: Report) -> str:
             "note": report.sandbox_note,
             "runs": [run.model_dump() for run in report.sandbox_runs],
         },
+        "fix": {
+            "requested": report.fix_requested,
+            "note": report.fix_note,
+            "attempts": [attempt.model_dump() for attempt in report.fix_attempts],
+            # model_dump leaves out `patched`: the exact content may contain secret values.
+            "proposal": report.fix.model_dump() if report.fix else None,
+        },
     }
     return json.dumps(data, ensure_ascii=True)
 
@@ -119,6 +136,37 @@ def _sandbox_lines(run: SandboxRun) -> list[str]:
     if run.outcome != "passed":
         tail = run.output.strip().splitlines()[-_OUTPUT_LINES_SHOWN:]
         lines.extend(f"    | {sanitize.one_line(line)}" for line in tail)
+    return lines
+
+
+def _fix_lines(report: Report) -> list[str]:
+    heading = "Proposed fix (validated in the sandbox, checked by the patch auditor; read it all):"
+    lines = [heading if report.fix is not None else "Fix:"]
+    for attempt in report.fix_attempts:
+        if not attempt.accepted:
+            reasons = "; ".join(sanitize.one_line(r) for r in attempt.reasons)
+            lines.append(f"  attempt {attempt.number} rejected: {reasons}")
+    if report.fix is None:
+        lines.append(f"  {sanitize.one_line(report.fix_note or 'no fix proposed')}")
+        return lines
+    lines.extend(_proposal_lines(report.fix))
+    return lines
+
+
+def _proposal_lines(fix: FixProposal) -> list[str]:
+    target = fix.target
+    lines = [
+        f"  for: [{target.severity}] {sanitize.one_line(target.file)}:{target.line} "
+        f"{target.source}/{sanitize.one_line(target.rule)}: {sanitize.one_line(target.message)}",
+        f"  why (from the patch author): {sanitize.one_line(fix.explanation, max_chars=500)}",
+    ]
+    if fix.tests is not None:
+        lines.append(f"  tests with the patch: {fix.tests.outcome} ({fix.tests.seconds:.1f}s)")
+    lines.extend(f"  [ALERT] {sanitize.one_line(alert)}" for alert in fix.alerts)
+    # Every line shown, invisible and control characters made visible.
+    lines.extend(
+        f"  | {sanitize.one_line(line, max_chars=20_000)}" for line in fix.diff.splitlines()
+    )
     return lines
 
 

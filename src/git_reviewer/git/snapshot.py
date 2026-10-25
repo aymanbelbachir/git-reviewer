@@ -15,6 +15,7 @@ review is never scanned or run without having been reviewed.
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -118,6 +119,64 @@ def export_tree(repo: Path, diff: Diff, dest: Path, *, hook: bool = False) -> Tr
                 data = contents[object_id]
                 _write_file(dest, path, data, file_mode=mode, dir_mode=_TREE_DIR_MODE)
     return TreeExport(files=files, skipped=skipped)
+
+
+def read_tree_file(tree: Path, path: str) -> bytes:
+    """A file of the sandbox copy (the reviewed version), never through a symlink."""
+    target = _tree_target(tree, path)
+    descriptor = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(descriptor, "rb") as handle:
+        return handle.read()
+
+
+def replace_tree_file(tree: Path, path: str, data: bytes) -> None:
+    """Swap the content of an existing file of the sandbox copy (to run the tests with a patch,
+    then to restore the reviewed version). Written to a new file, then renamed over the old one."""
+    target = _tree_target(tree, path)
+    mode = target.lstat().st_mode & 0o777
+    temporary = target.with_name(f".{target.name}.git-reviewer-tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(temporary, flags, 0o600)
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write(data)
+        os.fchmod(handle.fileno(), mode)
+    temporary.replace(target)
+
+
+@contextmanager
+def single_file(path: str, data: bytes) -> Generator[Snapshot]:
+    """A private snapshot holding one file, to run a scanner on a patched version."""
+    try:
+        decode_path(path.encode("utf-8"))
+    except UnsafePathError as exc:
+        raise UnsafeTreeError(str(exc)) from exc
+    with tempfile.TemporaryDirectory(prefix="git-reviewer-") as tmp:
+        base = Path(tmp)
+        root, work, empty = base / "files", base / "work", base / "empty"
+        for directory in (root, work, empty):
+            directory.mkdir(mode=0o700)
+        _write_file(root, path, data, file_mode=0o600, dir_mode=0o700)
+        yield Snapshot(root=root, files=(path,), work=work, empty=empty)
+
+
+def _tree_target(tree: Path, path: str) -> Path:
+    """An existing regular file of the sandbox copy, with no symlink on the way."""
+    try:
+        decode_path(path.encode("utf-8"))
+    except UnsafePathError as exc:
+        raise UnsafeTreeError(str(exc)) from exc
+    current = tree
+    for part in path.split("/"):
+        current = current / part
+        try:
+            info = current.lstat()
+        except OSError as exc:
+            raise SnapshotError(f"{path} is not in the sandbox copy") from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise SnapshotError(f"{path} goes through a symbolic link")
+    if not stat.S_ISREG(current.lstat().st_mode):
+        raise SnapshotError(f"{path} is not a regular file")
+    return current
 
 
 def _entries(repo: Path, diff: Diff, *, hook: bool, only: set[str] | None = None) -> list[Entry]:

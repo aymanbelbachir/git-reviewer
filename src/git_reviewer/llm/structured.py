@@ -43,6 +43,27 @@ class ReviewerOutput(BaseModel):
     summary: str = Field(max_length=1000)
 
 
+class PatchEditOutput(BaseModel):
+    """Replace lines start_line..end_line (1-based, inclusive) of `path` with `replacement`;
+    end_line = start_line - 1 inserts before start_line."""
+
+    model_config = _STRICT
+
+    path: str = Field(max_length=4096)
+    start_line: int = Field(ge=1)
+    end_line: int = Field(ge=0)
+    replacement: str = Field(max_length=5_000)
+
+
+class PatchAuthorOutput(BaseModel):
+    """Structured edits, never a free-form diff: we build the diff ourselves (§11)."""
+
+    model_config = _STRICT
+
+    edits: list[PatchEditOutput] = Field(min_length=1, max_length=10)
+    explanation: str = Field(max_length=500)
+
+
 class GuardianLineRef(BaseModel):
     model_config = _STRICT
 

@@ -114,6 +114,11 @@ def _ignored_or_downgraded(static: StaticFinding, findings: list[ReviewFinding])
     return downgraded or dismissed
 
 
+def leaks(raw_output: str, token: str) -> bool:
+    """Whether model output reveals `token` (a canary or a nonce), even disguised."""
+    return _squashed(token) in _squashed(raw_output)
+
+
 def _squashed(text: str) -> str:
     """Letters and digits only, compatibility-normalized and case-folded. JSON escapes are decoded
     first, so `\\u0043ANARY` or `canary - 1f2e...` still match the token."""

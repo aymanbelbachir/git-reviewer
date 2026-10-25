@@ -1,7 +1,7 @@
 # git-reviewer: architecture plan
 
-Status: phases 2 to 4 are implemented as described here; the sections for later phases (patches,
-hook) are still the plan. Every design decision below states its security rationale; threat IDs
+Status: phases 2 to 5 are implemented as described here; the sections for later phases (hook,
+final audit) are still the plan. Every design decision below states its security rationale; threat IDs
 (`T-xx`) refer to [SECURITY.md](../SECURITY.md).
 
 ## 1. Scope
@@ -84,7 +84,7 @@ src/git_reviewer/
     author.py          # LLM patch proposal (structured edits, not free-form diffs)
     policy.py          # deterministic path rules (final say)
     checks.py          # deterministic AST checks: new imports, network calls, weakened tests
-    apply.py           # confirmation, TOCTOU re-checks, git apply to the working tree
+    apply.py           # TOCTOU re-checks, then the validated content written to the working tree
   graph/
     state.py nodes.py build.py
   report/
@@ -113,7 +113,10 @@ tests/
 | `git-reviewer uninstall-hook` | Remove our hook, restore a chained one. |
 | `git-reviewer doctor` | Check git, Ollama (local, models present, not cloud), gitleaks and, as warnings since only `--run-tests` needs them, Docker (local endpoint, daemon, sandbox image) and leftover sandbox containers. |
 
-`--fix` implies `--run-tests`: a patch is only shown after it passed the sandbox validation.
+`--fix` implies `--run-tests`: a patch is only shown after it passed the sandbox validation. It
+is refused with `--hook` (a git hook cannot ask for the confirmation), never applied with
+`--format json`, and applied in text mode only after a typed `yes` on an interactive terminal.
+`--fix` does not change the exit code: it reflects the reviewed change, patched or not.
 
 The tool never builds or pulls the sandbox image: that needs the network, and the spec allows no
 network call except to Ollama. The user builds it once with a documented `docker build` command (§8.2).
@@ -150,16 +153,15 @@ flowchart TD
     epre --> tests[sandbox_tests]
     tests --> epost[execution_guard_post<br/>fingerprint + container gone]
     epost -->|blocked or no --fix| report
-    epost -->|--fix| author[propose_patch]
-    author --> ppol[patch_policy<br/>deterministic]
-    ppol -->|rejected| loop
-    ppol --> vpre[execution_guard_pre]
-    vpre -->|blocked| report
-    vpre --> validate[sandbox_validate_patch]
-    validate --> vpost[execution_guard_post]
-    vpost -->|blocked| report
-    vpost --> audit[patch_auditor]
-    audit --> loop{fix_loop<br/>ok, or attempts = 3?}
+    epost -->|--fix| prepare[prepare_fix<br/>pick the finding]
+    prepare --> author[propose_patch]
+    author --> check[check_patch<br/>path policy + code checks]
+    check -->|rejected| loop
+    check --> validate[validate_patch<br/>execution guards + sandbox + finding gone]
+    validate -->|blocked| report
+    validate -->|rejected| loop
+    validate --> audit[audit_patch<br/>patch auditor]
+    audit --> loop{ok, or 3 rounds?}
     loop -->|retry| author
     loop -->|done| report[final_report]
     report --> E([END])
@@ -173,8 +175,8 @@ Design rules:
   API to remove one.
 - **Routing is deterministic.** Conditional edges read only typed state (`blocks`, flags,
   `fix_attempts`), never LLM text. Any block routes straight to `final_report`.
-- **Fix loop.** `fix_attempts` is incremented by the graph and capped at 3 by a conditional
-  edge; `recursion_limit` is also set explicitly (e.g. 60) as a second bound.
+- **Fix loop.** Each round appends to `fix_attempts`; a conditional edge stops after 3 rounds, and
+  `recursion_limit` is set explicitly (60) as a second bound.
 - **No persistent checkpointer.** Checkpoints would write code and diffs to disk. The graph is
   compiled without one; the patch confirmation happens in the CLI after the graph returns, so
   `interrupt()` is not needed.
@@ -392,7 +394,8 @@ docker --host unix://<validated socket> run
 - If Docker is missing, not running, or the image is not built, `--run-tests` exits 4 before the
   review starts. There is no host fallback (T-16).
 - Test results are untrusted: test code can fake a pass (`os._exit(0)`, conftest hooks). They are a
-  quality signal for the user, never a security decision (T-34).
+  quality signal for the user, never a security decision (T-34). A pytest exit code 0 without its
+  "N passed" summary line is reported as an error, which catches the bare `os._exit(0)` case.
 - Tests run only after a completed review (they are skipped when the review is blocked or "not
   reviewed").
 
@@ -500,37 +503,73 @@ After the sandbox runs (also when a run failed):
   (execution guardian); after it, the review findings and the test results stay visible.
 
 ### 10.3 Patch auditor
-- Separate component and prompt from the patch author. It receives only the structured finding and
-  the patch diff, never the author's reasoning.
-- Checks: fixes only the announced finding; no new network call, dependency, import, obfuscation; does
-  not weaken tests (removed asserts, `skip`/`xfail`, relaxed tolerances, `try/except` that swallows
-  errors, changed expected values).
-- `patch.checks` runs the same checks deterministically on the AST before the auditor; `patch.policy`
-  runs before both and has the final say.
+- Separate component and prompt from the patch author (`guardians.patch_auditor`). It receives only
+  the structured finding and the patch diff, never the author's explanation or reasoning.
+- Checks: fixes only the announced finding; no new network call, process, dynamic code,
+  dependency, unneeded import or obfuscation; does not weaken tests (removed or changed asserts,
+  `skip`/`xfail`, relaxed tolerances, `try/except` that swallows errors, changed expected values);
+  does not hide the problem instead of fixing it.
+- "block" rejects the round, "suspect" keeps the patch with an alert shown next to it, a failure
+  rejects it (fail closed). A rejection is shown as an alert in the security report: it does not
+  block the review, whose change is not the patch.
+- `patch.policy` and `patch.checks` run before it and have the final say: the auditor can reject
+  what they accepted, never the reverse.
 
 ## 11. Patch flow
-1. The author returns **structured edits** (`path`, `start_line`, `end_line`, `replacement`) for one
-   finding; we generate the unified diff ourselves, so a malformed diff cannot confuse `git apply`.
-2. `patch.policy` (deterministic, final): path must be one of the diff's files; normalized with NFC
+0. One finding is chosen: the most severe one of medium severity or more, in a Python file of the
+   change, static findings before LLM findings at equal severity, skipping files the policy denies.
+   No patch is attempted if the project's tests do not pass before it (nothing could be validated),
+   or if the file is not UTF-8, has Windows line endings or is longer than 60,000 characters.
+1. The author (the reviewer model, its own prompt with a canary) gets the finding and the
+   reviewed version of that one file, numbered and nonce-delimited, plus why earlier rounds were
+   rejected. It returns **structured edits** (`path`, `start_line`, `end_line`, `replacement`) on
+   that file only; we build the unified diff ourselves with difflib, so a malformed diff never
+   exists. Lines are counted like git (split on "\n" only).
+2. `patch.policy` (deterministic, final): path must be a Python file of the diff, written with plain
+   characters only (letters, digits, `.`, `_`, `-`, `/`); normalized with NFC
    and casefold (macOS file systems are case-insensitive, so `.GIT/config` is `.git/config`); no
    absolute path, `..`, NUL or control characters; `lstat` says regular file, not symlink; resolved
    path stays inside the repo. Denied whatever the diff says: `.git/`, hooks dirs (`.githooks/`,
    `.husky/`), CI (`.github/`, `.gitlab-ci.yml`, `.circleci/`, `Jenkinsfile`, `azure-pipelines.yml`,
    `.travis.yml`, `.pre-commit-config.yaml`), dependency and build files (`pyproject.toml`, `setup.py`,
    `setup.cfg`, `requirements*.txt`, `constraints*.txt`, `uv.lock`, `poetry.lock`, `Pipfile*`,
-   `Makefile`, `Dockerfile*`), test infrastructure (`conftest.py`, `pytest.ini`, `tox.ini`, `noxfile.py`),
+   `Makefile`, `Dockerfile*`), test infrastructure (`conftest.py`, `pytest.ini`, `pytest.toml`,
+   `.pytest.toml`, `.pytest.ini`, `tox.ini`, `noxfile.py`),
    Python startup hooks (`sitecustomize.py`, `usercustomize.py`, `*.pth`), tool configs
    (`.git-reviewer*`, `.gitleaks.toml`, `.gitleaksignore`, `ruff.toml`, `.ruff.toml`, `.bandit`),
    files that editors and coding agents load automatically (`.envrc`, `.vscode/`, `.idea/`,
    `.devcontainer/`, `.claude/`, `.cursor/`, `CLAUDE.md`, `AGENTS.md`), and `.gitattributes`, `.gitmodules`.
-3. Apply to the sandbox copy of the tree → execution guards → sandbox validation → deterministic checks →
-   auditor. Up to 3 attempts; test failures are fed back to the author only as a sanitized summary
-   (test ids and truncated messages inside nonce delimiters), because test output is attacker-controlled.
-4. The CLI shows the full diff (sanitized, invisible characters made visible) and asks for a typed
-   `yes`. Only on an interactive TTY; never in hook mode or with `--format json`.
-5. Before writing: re-run `patch.policy` against the user's tree and check that the target files
-   are byte-identical to what was reviewed (TOCTOU). Then `git apply --check` and `git apply` on the
-   working tree only (not the index), hooks disabled, never `--unsafe-paths`. No commit, no push.
+3. Then, in this order, so that a patch failing a cheap deterministic check never runs, even in
+   the sandbox: `patch.checks` (an encoding declaration other than UTF-8/ASCII/Latin-1 is refused,
+   then both versions are parsed from bytes, as Python reads them, and compared: new risky import,
+   third-party dependency or star import; new uses, with import aliases resolved, of
+   eval/exec/os.system/os._exit/subprocess/socket/HTTP/decoding helpers, including
+   `getattr(os, "system")` and getattr on computed names; long literals; invisible characters;
+   catch-all `except`, also in a tuple; and in test files any removed or changed assertion or test,
+   any new skip/xfail/SkipTest/skipTest, and any new early `return`/`raise` or constant condition
+   inside a test; added lines longer than 300 characters, which the user could not read in full,
+   are refused too); then the execution
+   guardian (argv barrier, and the agent when the file is test infrastructure); then the sandbox
+   run of pytest on the copy with the patch (the copy is restored to the reviewed version
+   afterwards), followed by the fingerprint and leftover-container checks; then, for a scanner
+   finding, the same scanner must report that rule fewer times in the patched file (a file the
+   scanner cannot parse does not count as fixed); then the auditor. Guardian alerts on the patch
+   ("suspect") are shown next to it and in the security report. Up to 3 rounds. Rejection reasons go back to the author inside nonce delimiters; from
+   the tests, only pytest's `FAILED`/`ERROR` summary lines, sanitized and truncated, because test
+   output is attacker-controlled. A canary leak by the author blocks the review.
+4. The CLI shows the full diff (sanitized, invisible characters made visible), the author's
+   explanation (labelled as such), the test result and any auditor alert, and asks for a typed
+   `yes`. Only on an interactive terminal; never in hook mode or with `--format json` (the JSON
+   carries the diff for display, never the raw new content).
+5. Before writing: `patch.policy` again, then the working tree as it is now: no symlink on the path,
+   a regular file inside the repository, and exactly the bytes that were reviewed (TOCTOU; a file
+   with unstaged changes is not patched either). The exact content validated in the sandbox is
+   written to a new file next to the target (`O_EXCL|O_NOFOLLOW`, same mode) and renamed over it:
+   the rename replaces the path, so a symlink swapped in at the last moment is replaced, never
+   followed. No `git apply`: it would run the filters selected by `.gitattributes`, and git 2.46
+   crashes in `git apply` with `--attr-source`. Working tree only: nothing is staged, committed or
+   pushed (a structural test forbids `git add`, `commit`, `push`, `update-index`, `update-ref`,
+   `reset` and `stash` in the code).
 
 ## 12. Reports and logs
 - `Report` (Pydantic) → renderers: text (default), JSON, and an optional Markdown file. Files are
@@ -599,6 +638,6 @@ exec "/absolute/path/to/git-reviewer" review --hook --mode block
 | 2 | `pyproject.toml` + `uv.lock`, CI, `cli.py`, `config.py`, `proc.py`, `git/diff.py`, `git/refs.py`, `llm/ollama.py` checks, telemetry off, socket guard |
 | 3 | `static/*`, `llm/prompts.py`, `llm/structured.py`, `graph/*` without sandbox, `report/*`, `sanitize.py`, injection guardian |
 | 4 | `git/snapshot.py` tree export, `sandbox/*`, `sandbox/Dockerfile`, execution guardian |
-| 5 | `patch/*`, patch auditor, fix loop |
+| 5 | `patch/*` (author, edits, policy, checks, apply), `guardians/patch_auditor.py`, `graph/fix.py` |
 | 6 | `hook/*` |
 | 7 | full security suite, guardian datasets ≥ 20 per guardian, `/red-team`, `/security-gate`, final audit |

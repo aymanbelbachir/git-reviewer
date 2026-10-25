@@ -10,6 +10,8 @@ from git_reviewer.models import (
     SEVERITY_RANK,
     Decision,
     FileChange,
+    FixProposal,
+    PatchAttempt,
     ReviewFinding,
     SandboxRun,
     Severity,
@@ -44,6 +46,11 @@ class Report(BaseModel):
     sandbox_runs: tuple[SandboxRun, ...] = ()
     sandbox_note: str | None = None
     """Why the sandbox did not run, or stopped early."""
+
+    fix_requested: bool = False
+    fix: FixProposal | None = None
+    fix_attempts: tuple[PatchAttempt, ...] = ()
+    fix_note: str | None = None
 
 
 def exit_code(report: Report, *, block_mode: bool, threshold: Severity) -> int:

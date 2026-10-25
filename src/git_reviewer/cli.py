@@ -43,8 +43,9 @@ from git_reviewer.llm.ollama import (
     validate_url,
 )
 from git_reviewer.llm.structured import ChatFn, ollama_chat
+from git_reviewer.patch.apply import PatchApplyError, apply_patch
 from git_reviewer.report import render
-from git_reviewer.report.model import exit_code
+from git_reviewer.report.model import Report, exit_code
 from git_reviewer.sandbox.docker import DockerError, DockerSandbox, ImageMissingError
 from git_reviewer.sandbox.docker import sandbox_session as docker_session
 from git_reviewer.sandbox.endpoint import (
@@ -89,7 +90,10 @@ def review(
     run_tests: Annotated[
         bool, typer.Option("--run-tests", help="Run tests in the sandbox.")
     ] = False,
-    fix: Annotated[bool, typer.Option("--fix", help="Propose a validated patch.")] = False,
+    fix: Annotated[
+        bool,
+        typer.Option("--fix", help="Propose one sandbox-tested patch (implies --run-tests)."),
+    ] = False,
     mode: Annotated[
         Mode, typer.Option("--mode", help="block: fail on findings; warn: report only.")
     ] = Mode.block,
@@ -97,8 +101,9 @@ def review(
     hook: Annotated[bool, typer.Option("--hook", hidden=True)] = False,
 ) -> None:
     """Review the staged changes (default) or a commit range."""
-    if fix:
-        _fail(EXIT_USAGE, "--fix arrives in phase 5; not available yet")
+    if fix and hook:
+        _fail(EXIT_USAGE, "--fix is not available in hook mode: a patch needs your confirmation")
+    run_tests = run_tests or fix
     if hook and range_spec is not None:
         _fail(EXIT_USAGE, "--hook reviews the staged changes; it cannot be combined with --range")
     settings = _settings()
@@ -117,6 +122,7 @@ def review(
             reviewer=reviewer,
             guardian=guardian,
             sandbox=sandbox,
+            fix=fix,
         )
         _review_and_exit(context, settings, mode, output_format)
 
@@ -142,6 +148,8 @@ def _review_and_exit(
         typer.echo(render.to_json(report))
     else:
         typer.echo(render.to_text(report))
+        if report.fix is not None:
+            _offer_patch(context.repo, report)
     block_mode = mode is Mode.block
     raise typer.Exit(
         exit_code(report, block_mode=block_mode, threshold=settings.severity_threshold)
@@ -323,6 +331,35 @@ def _require_binary(name: str, hint: str) -> None:
         )
     except proc.ProcError as exc:
         _fail(EXIT_ENVIRONMENT, str(exc))
+
+
+def _offer_patch(repo: Path, report: Report) -> None:
+    """Apply the proposed patch only after a typed "yes" on an interactive terminal."""
+    proposal = report.fix
+    if proposal is None or report.status != "reviewed":
+        return
+    if not _interactive():
+        message = "The patch was not applied: confirming it needs an interactive terminal."
+        typer.echo(message, err=True)
+        return
+    question = f"Apply this patch to {sanitize.one_line(proposal.file)}? Type yes to apply"
+    answer = typer.prompt(question, default="", show_default=False)
+    if answer.strip() != "yes":
+        typer.echo("Not applied.")
+        return
+    try:
+        apply_patch(repo, report.files, proposal)
+    except (PatchApplyError, proc.ProcError, OSError) as exc:
+        typer.echo(f"error: not applied: {sanitize.one_line(str(exc))}", err=True)
+        return
+    typer.echo(
+        f"Applied to {sanitize.one_line(proposal.file)} in the working tree only: nothing was "
+        "staged or committed. Check it with: git diff"
+    )
+
+
+def _interactive() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
 
 
 def _not_reviewed(reason: str, mode: Mode, output_format: OutputFormat) -> NoReturn:

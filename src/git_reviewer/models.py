@@ -114,3 +114,48 @@ class SandboxRun(BaseModel):
     detail: str = Field(default="", max_length=300)
     output: str = Field(default="", max_length=8_000)
     """The end of the combined output, untrusted: masked and sanitized before display."""
+
+
+class FixTarget(BaseModel):
+    """The one finding a patch is proposed for (static analysis or LLM review)."""
+
+    model_config = _FROZEN
+
+    source: Literal["ruff", "bandit", "gitleaks", "reviewer"]
+    rule: str = Field(max_length=100)
+    file: str = Field(max_length=4096)
+    line: int = Field(ge=1)
+    severity: Severity
+    message: str = Field(max_length=1000)
+
+
+class PatchAttempt(BaseModel):
+    """One round of the fix loop and why it was rejected (our own text, never model output)."""
+
+    model_config = _FROZEN
+
+    number: int = Field(ge=1)
+    accepted: bool
+    reasons: tuple[str, ...] = Field(default=(), max_length=10)
+
+
+class FixProposal(BaseModel):
+    """A patch that passed every check. Applied only after the user types yes (patch.apply)."""
+
+    model_config = _FROZEN
+
+    target: FixTarget
+    file: str = Field(max_length=4096)
+    explanation: str = Field(max_length=500)
+    diff: str = Field(max_length=200_000)
+    """For display: secrets masked."""
+
+    patched: str = Field(max_length=200_000, exclude=True)
+    """The exact new content of `file`, as validated in the sandbox: what is written on "yes".
+    Never serialized (it may contain secret values)."""
+
+    original_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    """The reviewed content of `file`: the working tree must still have it to apply the patch."""
+
+    alerts: tuple[str, ...] = Field(default=(), max_length=10)
+    tests: SandboxRun | None = None

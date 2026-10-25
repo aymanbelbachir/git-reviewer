@@ -22,7 +22,7 @@ from git_reviewer.llm.structured import (
     ReviewerOutput,
     ask_json,
 )
-from git_reviewer.models import Decision, ReviewFinding, SandboxRun
+from git_reviewer.models import Decision, FixProposal, PatchAttempt, ReviewFinding, SandboxRun
 from git_reviewer.report.model import Report, Status
 from git_reviewer.sandbox.docker import SANDBOX_TOOLS, DockerError, Sandbox
 from git_reviewer.sandbox.fingerprint import FingerprintError, fingerprint
@@ -207,6 +207,12 @@ def final_report(state: ReviewState, runtime: Runtime[ReviewContext]) -> dict[st
             for run in state.get("sandbox_runs", ())
         ),
         sandbox_note=state.get("sandbox_note"),
+        fix_requested=state.get("fix", False),
+        fix=_masked_fix(state.get("fix_proposal"), secrets),
+        fix_attempts=tuple(
+            _masked_attempt(attempt, secrets) for attempt in state.get("fix_attempts", ())
+        ),
+        fix_note=_fix_note(state),
     )
     return {"report": report}
 
@@ -231,6 +237,12 @@ def route_after_post(state: ReviewState) -> Literal["execution_guard_pre", "fina
     return "execution_guard_pre"
 
 
+def route_after_execution_post(state: ReviewState) -> Literal["prepare_fix", "final_report"]:
+    if worst(state.get("decisions", ())) == "block" or not state.get("fix", False):
+        return "final_report"
+    return "prepare_fix"
+
+
 def route_after_execution_pre(state: ReviewState) -> Literal["sandbox_tests", "final_report"]:
     if worst(state.get("decisions", ())) == "block" or "sandbox_note" in state:
         return "final_report"
@@ -248,6 +260,43 @@ def _sandbox(ctx: ReviewContext) -> Sandbox:
     if ctx.sandbox is None:
         raise RuntimeError("a sandbox node ran without --run-tests")
     return ctx.sandbox
+
+
+def _masked_attempt(attempt: PatchAttempt, secrets: tuple[str, ...]) -> PatchAttempt:
+    """Reasons can quote test output or guardian text, which may contain a secret value."""
+    reasons = tuple(sanitize.mask_secrets(reason, secrets) for reason in attempt.reasons)
+    return attempt.model_copy(update={"reasons": reasons})
+
+
+def _masked_fix(proposal: FixProposal | None, secrets: tuple[str, ...]) -> FixProposal | None:
+    """Secrets masked in what is shown; `patched` (never serialized) stays exact for writing."""
+    if proposal is None:
+        return None
+    target = proposal.target.model_copy(
+        update={"message": sanitize.mask_secrets(proposal.target.message, secrets)}
+    )
+    return proposal.model_copy(
+        update={
+            "target": target,
+            "diff": sanitize.mask_secrets(proposal.diff, secrets),
+            "explanation": sanitize.mask_secrets(proposal.explanation, secrets),
+            "alerts": tuple(sanitize.mask_secrets(alert, secrets) for alert in proposal.alerts),
+            "tests": None
+            if proposal.tests is None
+            else proposal.tests.model_copy(
+                update={"output": sanitize.mask_secrets(proposal.tests.output, secrets)}
+            ),
+        }
+    )
+
+
+def _fix_note(state: ReviewState) -> str | None:
+    if "fix_note" in state:
+        return state["fix_note"]
+    rounds = len(state.get("fix_attempts", ()))
+    if rounds and "fix_proposal" not in state:
+        return f"no fix proposed: no patch passed every check in {rounds} round(s)"
+    return None
 
 
 def _sandbox_notes(state: ReviewState) -> list[str]:

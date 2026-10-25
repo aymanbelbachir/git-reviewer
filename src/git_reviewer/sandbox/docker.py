@@ -35,6 +35,7 @@ _HOST_MARGIN_SECONDS = 30
 _DOCKER_CALL_SECONDS = 30
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
 _CONTAINER_ID = re.compile(r"[0-9a-f]{64}")
+_PYTEST_PASSED = re.compile(r"\b\d+ passed\b")
 
 
 class DockerError(RuntimeError):
@@ -157,6 +158,9 @@ class DockerSandbox:
             self._remove(policy.container_name(spec))
         outcome, detail = _outcome(tool, result.returncode)
         output = (result.stdout + b"\n" + result.stderr).decode("utf-8", "replace")
+        if tool == "pytest" and outcome == "passed" and not _PYTEST_PASSED.search(output):
+            # os._exit(0) in code the tests import ends pytest "successfully" before any test.
+            outcome, detail = "error", "pytest exited 0 without reporting passed tests"
         return _run(tool, outcome, result.returncode, started, detail, output)
 
     def leftover_containers(self, run_id: str | None = None) -> list[str]:

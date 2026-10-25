@@ -142,3 +142,17 @@ def test_write_detection(source: str, writes: bool) -> None:
     call = ast.parse(source, mode="eval").body
     assert isinstance(call, ast.Call)
     assert _is_open_for_writing(call) is writes
+
+
+_FORBIDDEN_GIT_COMMANDS = {"add", "commit", "push", "update-index", "update-ref", "reset", "stash"}
+
+
+@pytest.mark.parametrize("path", modules(), ids=relative)
+def test_no_git_command_that_stages_commits_or_pushes(path: Path) -> None:
+    """The tool never stages, commits or pushes (docs/SPEC.md security requirement 4; R4.6)."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.List | ast.Tuple) and node.elts:
+            first = node.elts[0]
+            if isinstance(first, ast.Constant) and first.value in _FORBIDDEN_GIT_COMMANDS:
+                pytest.fail(f"{relative(path)} builds a git {first.value} command")

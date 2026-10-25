@@ -87,8 +87,9 @@ def test_nothing_staged(make_repo: Callable[..., Path], monkeypatch: pytest.Monk
     assert "Nothing to review" in result.output
 
 
-def test_fix_is_not_available_yet(staged_repo: Path) -> None:
-    assert runner.invoke(cli.app, ["review", "--fix"]).exit_code == cli.EXIT_USAGE
+def test_fix_is_refused_in_hook_mode(staged_repo: Path) -> None:
+    # A patch needs the user's typed confirmation, which a git hook cannot ask for.
+    assert runner.invoke(cli.app, ["review", "--fix", "--hook"]).exit_code == cli.EXIT_USAGE
 
 
 def test_hook_and_range_are_exclusive(staged_repo: Path) -> None:
@@ -378,3 +379,68 @@ def test_run_tests_end_to_end_with_a_fake_sandbox(
     data = json.loads(block.stdout)
     assert [run["outcome"] for run in data["sandbox"]["runs"]] == ["failed", "passed"]
     assert sandbox.runs == ["pytest", "ruff"]
+
+
+# --- --fix -----------------------------------------------------------------------------------
+
+VULNERABLE = (
+    "import subprocess\n\n\ndef run(name):\n    return subprocess.run('ls ' + name, shell=True)\n"
+)
+GOOD_PATCH = "    return subprocess.run(['ls', '--', name], check=True)\n"
+
+
+@pytest.fixture
+def fix_repo(
+    make_repo: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    fake_ollama: FakeLLM,
+) -> Path:
+    import contextlib
+
+    from tests.helpers import FakeSandbox, patch_json
+
+    repo = make_repo()
+    write_files(repo, {"app.py": VULNERABLE})
+    git(repo, "add", "app.py")
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    fake_ollama.patch_answer = patch_json("app.py", 5, 5, GOOD_PATCH)
+
+    @contextlib.contextmanager
+    def fake_session(settings: object) -> Iterator[FakeSandbox]:
+        yield FakeSandbox()
+
+    monkeypatch.setattr(cli, "_sandbox", fake_session)
+    return repo
+
+
+def test_fix_is_not_applied_without_a_terminal(fix_repo: Path) -> None:
+    result = runner.invoke(cli.app, ["review", "--fix"])
+    assert "Proposed fix" in result.output
+    assert "needs an interactive terminal" in result.output
+    assert (fix_repo / "app.py").read_text() == VULNERABLE
+
+
+@pytest.mark.parametrize(("answer", "applied"), [("yes\n", True), ("no\n", False), ("y\n", False)])
+def test_fix_is_applied_only_on_a_typed_yes(
+    fix_repo: Path, monkeypatch: pytest.MonkeyPatch, answer: str, applied: bool
+) -> None:
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    index = git(fix_repo, "ls-files", "--stage").stdout
+    result = runner.invoke(cli.app, ["review", "--fix"], input=answer)
+    assert ("check=True" in (fix_repo / "app.py").read_text()) is applied
+    assert git(fix_repo, "ls-files", "--stage").stdout == index  # never staged
+    assert ("nothing was staged or committed" in result.output) is applied
+
+
+def test_fix_in_json_mode_is_proposed_never_applied(
+    fix_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    result = runner.invoke(cli.app, ["review", "--fix", "--format", "json"], input="yes\n")
+    data = json.loads(result.stdout)
+    proposal = data["fix"]["proposal"]
+    assert proposal["file"] == "app.py" and "check=True" in proposal["diff"]
+    assert "patched" not in proposal  # the exact content is never serialized
+    assert (fix_repo / "app.py").read_text() == VULNERABLE

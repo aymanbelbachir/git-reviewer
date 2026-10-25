@@ -10,11 +10,18 @@ from __future__ import annotations
 import operator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from git_reviewer.git.diff import DiffLimits
 from git_reviewer.llm.structured import ChatFn, ReviewerOutput
-from git_reviewer.models import Decision, Diff, SandboxRun
+from git_reviewer.models import (
+    Decision,
+    Diff,
+    FixProposal,
+    FixTarget,
+    PatchAttempt,
+    SandboxRun,
+)
 from git_reviewer.report.model import Report
 from git_reviewer.sandbox.docker import Sandbox
 from git_reviewer.static.analyze import StaticResult
@@ -36,6 +43,15 @@ class ReviewState(TypedDict, total=False):
     sandbox_runs: tuple[SandboxRun, ...]
     sandbox_note: str
     sandbox_skipped: tuple[str, ...]
+    fix: bool
+    fix_target: FixTarget
+    fix_original: str
+    fix_original_count: int
+    fix_attempts: tuple[PatchAttempt, ...]
+    candidate: Any
+    """The patch of the current fix round (graph.fix.Candidate), or None once it is rejected."""
+    fix_proposal: FixProposal
+    fix_note: str
     report: Report
 
 
@@ -51,3 +67,5 @@ class ReviewContext:
     guardian: ChatFn
     sandbox: Sandbox | None = None
     """Set by --run-tests: the project's tests and linter then run in this sandbox."""
+    fix: bool = False
+    """--fix: propose one patch, validated in the sandbox (needs `sandbox`)."""

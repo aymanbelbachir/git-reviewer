@@ -32,3 +32,15 @@ USER 10001:10001
 ```
 
 If the change under review modifies the dependencies, the tests still run with the trusted set.
+
+## Proposing a fix
+
+`git-reviewer review --fix` (which implies `--run-tests`) also proposes one patch, for the most
+severe finding in a Python file of the change. The patch is written by your local model, checked by
+deterministic rules (no network, process or dynamic code, no new dependency, no weakened test),
+run in the sandbox (the tests must still pass, and the scanner must stop reporting the problem),
+then checked by a separate patch auditor. Up to three attempts.
+
+You see the full diff and type `yes` to apply it, in an interactive terminal only. It is written to
+your working tree only: nothing is staged or committed, so review it with `git diff` and stage it
+yourself. `--fix` is refused in a git hook, and `--format json` only shows the proposal.

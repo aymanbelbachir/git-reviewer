@@ -76,6 +76,7 @@ def run_graph(
     max_chars: int = 60_000,
     context_tokens: int = 32_768,
     sandbox: Sandbox | None = None,
+    fix: bool = False,
 ) -> Report:
     """The whole review graph on the staged changes of `repo`, with a fake model (and, for
     --run-tests, a sandbox)."""
@@ -89,6 +90,7 @@ def run_graph(
         reviewer=llm,
         guardian=llm,
         sandbox=sandbox,
+        fix=fix,
     )
     return run_review(context)
 
@@ -105,6 +107,7 @@ class FakeSandbox:
         self,
         *,
         outcomes: Mapping[SandboxTool, SandboxOutcome] | None = None,
+        pytest_outcomes: list[SandboxOutcome] | None = None,
         image_error: Exception | None = None,
         run_error: Exception | None = None,
         on_run: Callable[[SandboxTool], None] | None = None,
@@ -115,6 +118,9 @@ class FakeSandbox:
         self._tree = workspace / "tree"
         self._tree.mkdir(mode=0o700)
         self.outcomes: dict[SandboxTool, SandboxOutcome] = dict(outcomes or {})
+        self.pytest_outcomes = list(pytest_outcomes or [])
+        self.contents: list[dict[str, bytes]] = []
+        """The exported tree as each run saw it."""
         self.image_error = image_error
         self.run_error = run_error
         self.on_run = on_run
@@ -151,9 +157,18 @@ class FakeSandbox:
             for path in self._tree.rglob("*")
             if path.is_file()
         )
+        self.contents.append(
+            {
+                path.relative_to(self._tree).as_posix(): path.read_bytes()
+                for path in self._tree.rglob("*")
+                if path.is_file()
+            }
+        )
         if self.on_run is not None:
             self.on_run(tool)
         outcome: SandboxOutcome = self.outcomes.get(tool, "passed")
+        if tool == "pytest" and self.pytest_outcomes:
+            outcome = self.pytest_outcomes.pop(0)
         code = {"passed": 0, "failed": 1, "no_tests": 5, "killed": 137, "error": 2}[outcome]
         return SandboxRun(
             tool=tool,
@@ -167,23 +182,40 @@ class FakeSandbox:
         return list(self.leftovers)
 
 
-class FakeLLM:
-    """Stands in for Ollama. Answers by schema: guardian schemas have a "verdict" property.
+def patch_json(path: str, start: int, end: int, replacement: str, why: str = "fix") -> str:
+    import json
 
-    An answer may be an Exception instance, which is raised instead.
+    edit = {"path": path, "start_line": start, "end_line": end, "replacement": replacement}
+    return json.dumps({"edits": [edit], "explanation": why})
+
+
+class FakeLLM:
+    """Stands in for Ollama. Answers by schema: guardian schemas have a "verdict" property, the
+    patch author's has "edits", anything else is the reviewer.
+
+    An answer may be an Exception instance, which is raised instead, or a callable
+    (system, user) -> answer.
     """
 
-    def __init__(self, reviewer: object = None, guardian: object = None) -> None:
+    def __init__(
+        self, reviewer: object = None, guardian: object = None, patch: object = None
+    ) -> None:
         self.reviewer_answer = reviewer if reviewer is not None else reviewer_json()
         self.guardian_answer = guardian if guardian is not None else guardian_json()
+        self.patch_answer = patch if patch is not None else ValueError("no patch answer set")
         self.reviewer_calls: list[tuple[str, str]] = []
         self.guardian_calls: list[tuple[str, str]] = []
+        self.patch_calls: list[tuple[str, str]] = []
 
     def __call__(self, system: str, user: str, schema: dict[str, object]) -> str:
-        is_guardian = "verdict" in str(schema.get("properties", {}))
-        calls = self.guardian_calls if is_guardian else self.reviewer_calls
+        properties = str(schema.get("properties", {}))
+        if "verdict" in properties:
+            calls, answer = self.guardian_calls, self.guardian_answer
+        elif "edits" in properties:
+            calls, answer = self.patch_calls, self.patch_answer
+        else:
+            calls, answer = self.reviewer_calls, self.reviewer_answer
         calls.append((system, user))
-        answer = self.guardian_answer if is_guardian else self.reviewer_answer
         if callable(answer) and not isinstance(answer, str):
             answer = answer(system, user)
         if isinstance(answer, BaseException):

@@ -206,7 +206,12 @@ def _is_python(snapshot: Snapshot, path: str) -> bool:
 
 
 def _safe_coding(snapshot: Snapshot, path: str) -> bool:
-    for line in _head(snapshot, path, lines=2).split(b"\n"):
+    return declared_coding_is_safe(_head(snapshot, path, lines=2))
+
+
+def declared_coding_is_safe(data: bytes) -> bool:
+    """A PEP 263 declaration in the first two lines, if any, names a safe encoding."""
+    for line in data.split(b"\n")[:2]:
         match = _CODING_DECLARATION.match(line)
         if match:
             return match.group(1).decode("ascii", "replace").lower() in _SAFE_CODINGS

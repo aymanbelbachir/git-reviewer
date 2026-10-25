@@ -179,3 +179,14 @@ def test_a_failed_removal_keeps_the_run_result(fake: FakeDocker) -> None:
         result = sandbox.run("pytest", RUN_ID, IMAGE_ID)
     # The leftover check that follows in the graph is what blocks a surviving container.
     assert result.outcome == "killed"
+
+
+def test_pytest_exit_0_without_passed_tests_is_an_error(fake: FakeDocker) -> None:
+    # os._exit(0) in code the tests import makes pytest exit 0 before running any test.
+    fake.run_handler = lambda args: proc.Result(0, b"", b"")
+    with sandbox_session(SOCKET, "img:1", 60) as sandbox:
+        result = sandbox.run("pytest", RUN_ID, IMAGE_ID)
+    assert (result.outcome, result.detail) == (
+        "error",
+        "pytest exited 0 without reporting passed tests",
+    )

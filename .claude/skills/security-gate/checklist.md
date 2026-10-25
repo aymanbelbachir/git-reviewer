@@ -59,7 +59,9 @@ SECURITY.md; section numbers to docs/ARCHITECTURE.md. The phase in brackets is w
   source; compare entry by entry), with a test per category.
 - R4.4 The full diff is displayed (sanitized) and applied only after a typed confirmation on a TTY; never
   in hook or JSON mode.
-- R4.5 Targets are re-checked just before applying (TOCTOU); `git apply` never uses `--unsafe-paths`.
+- R4.5 Targets are re-checked just before applying (TOCTOU: path rules, no symlink, exact reviewed bytes);
+  the validated content is written through a new file and a rename, never through a symlink; no
+  `git apply`.
 - R4.6 No `git add`, `commit` or `push` anywhere in `src/`.
 
 ## R5. System commands [phase 2]
