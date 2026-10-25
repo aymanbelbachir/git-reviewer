@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -9,11 +10,21 @@ import pytest
 from typer.testing import CliRunner
 
 from git_reviewer import cli, proc
+from git_reviewer.config import ENV_PREFIX
 from git_reviewer.git.diff import DiffError
 from git_reviewer.llm.ollama import CloudModelError, ModelMissingError, OllamaUnreachableError
 from tests.helpers import FakeLLM, git, reviewer_json, write_files
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _no_outside_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CLI tests start from the default settings: GIT_REVIEWER_* variables from the shell or CI
+    (CI sets GIT_REVIEWER_SANDBOX_IMAGE for the Docker tests) would change them."""
+    for name in list(os.environ):
+        if name.startswith(ENV_PREFIX):
+            monkeypatch.delenv(name)
 
 
 @pytest.fixture(autouse=True)
