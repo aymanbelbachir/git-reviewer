@@ -47,6 +47,7 @@ from git_reviewer.models import (
 from git_reviewer.patch import author, checks, edits, policy
 from git_reviewer.sandbox.docker import DockerError, Sandbox
 from git_reviewer.sandbox.fingerprint import FingerprintError, fingerprint
+from git_reviewer.static.analyze import added_findings
 from git_reviewer.static.tools import StaticAnalysisError, run_bandit, run_gitleaks, run_ruff
 
 from .state import ReviewContext, ReviewState
@@ -139,6 +140,13 @@ def check_patch(state: ReviewState, runtime: Runtime[ReviewContext]) -> dict[str
     candidate = _candidate(state)
     found = policy.problems(target.file, _need(state, "diff").files)
     found += checks.problems(target.file, original, candidate.patched)
+    if not found:
+        # A fix must not bring a new problem: ruff and bandit on both versions (after the
+        # path rules, so they only ever read the one reviewed Python file).
+        try:
+            found += added_findings(target.file, original, candidate.patched, runtime.context.repo)
+        except (StaticAnalysisError, SnapshotError, proc.ProcError, OSError) as exc:
+            found.append(f"cannot run the scanners on the patched file: {exc}")
     if len(candidate.diff) > _MAX_DIFF_CHARS:
         found.append("the patch is too large")
     added = edits.added_lines(original, candidate.patched)

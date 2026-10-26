@@ -16,7 +16,13 @@ The original and the patched file are parsed and compared, so only what the patc
 - swallowed errors: more `except:` / `except Exception` / `except BaseException` handlers, also
   inside a tuple such as `except (ValueError, Exception)`;
 - weakened tests: a removed or changed assertion or test function, a new skip/xfail/SkipTest, or a
-  new early `return`/`raise` or constant condition (`if False:`) inside a test function.
+  new early `return`/`raise` or constant condition (`if False:`) inside a test function;
+- unsafe fallbacks: a risky call (eval, pickle.loads, yaml.load...) inside an exception handler,
+  the classic half fix that keeps the dangerous path when the safe one fails;
+- secrets: a logging or print call that writes a value named like a secret (password, token,
+  key...) or a "password=%s"-style field, and an environment lookup of a secret with a hardcoded
+  fallback value;
+- permissions: a cleared umask or a world-writable chmod.
 The patch auditor checks the same things with judgment; these checks cannot be talked out of it.
 Known limit: a denylist cannot follow every indirection (`o = os; o.system(...)`); such patches
 still face the sandbox, the auditor and the user's reading of the diff (SECURITY.md T-03).
@@ -25,6 +31,9 @@ still face the sandbox, the auditor and the user's reading of the diff (SECURITY
 from __future__ import annotations
 
 import ast
+import itertools
+import re
+import stat
 import sys
 import unicodedata
 from collections import Counter
@@ -123,6 +132,45 @@ _SKIP_MARKERS = frozenset(
 )
 _BROAD_EXCEPTIONS = frozenset({"Exception", "BaseException"})
 _MAX_LITERAL = 200
+# Calls that run or deserialize data: kept as a fallback, they keep the hole the fix closes.
+_UNSAFE_FALLBACKS = frozenset(
+    {
+        "eval",
+        "exec",
+        "compile",
+        "__import__",
+        "os.system",
+        "os.popen",
+        "pickle.load",
+        "pickle.loads",
+        "marshal.loads",
+        "yaml.load",
+        "yaml.load_all",
+        "yaml.unsafe_load",
+        "yaml.unsafe_load_all",
+        "yaml.full_load",
+        "yaml.full_load_all",
+    }
+)
+_UNSAFE_FALLBACK_PREFIXES = ("os.exec", "os.spawn", "os.posix_spawn", "subprocess.")
+# Whole words of an identifier (`db_password`, `apiToken`), so `passed` or `max_tokens` are not.
+_SECRET_PARTS = frozenset(
+    {"password", "passwd", "pwd", "secret", "token", "credential", "credentials", "apikey"}
+)
+_SECRET_PAIRS = frozenset(
+    {("api", "key"), ("private", "key"), ("access", "key"), ("secret", "key")}
+)
+_IDENTIFIER_PART = re.compile(r"[A-Z]?[a-z0-9]+|[A-Z]+(?![a-z])")
+# "password=", "access_token:" in a message that also carries data.
+_SECRET_FIELD = re.compile(
+    r"(?<![A-Za-z])(password|passwd|pwd|secret|token|api[_ ]?key|credentials?)\s*[=:]", re.I
+)
+_LOG_METHODS = frozenset(
+    {"debug", "info", "warning", "warn", "error", "critical", "exception", "log"}
+)
+_LOGGER_NAMES = frozenset({"log", "logger", "logging", "_log", "_logger", "audit"})
+_ENV_LOOKUPS = frozenset({"os.getenv", "os.environ.get", "os.environ.setdefault"})
+_CHMOD_CALLS = frozenset({"os.chmod", "os.fchmod", "os.lchmod"})
 
 
 def problems(path: str, original: str, patched: str) -> list[str]:
@@ -153,6 +201,11 @@ def _problems(path: str, original: str, patched: str) -> list[str]:
     found += _obfuscation_problems(before, after, original, patched)
     if _broad_handlers(after) > _broad_handlers(before):
         found.append("adds an exception handler that catches everything")
+    for offending, problem in _HABITS:
+        # The offending calls themselves are compared, not their number: a patch that removes
+        # one secret log and adds another still adds one.
+        if offending(after) - offending(before):
+            found.append(problem)
     if is_test_infrastructure(path) or _defines_tests(before):
         found += _test_problems(before, after)
     elif _skips(after) > _skips(before):
@@ -372,3 +425,163 @@ def _dotted(node: ast.expr) -> str:
         parts.append(node.id)
         return ".".join(reversed(parts))
     return ""
+
+
+def _unsafe_fallbacks(tree: ast.Module) -> Counter[str]:
+    """Running or deserializing calls inside exception handlers: `except ValueError: eval(v)`."""
+    aliases = _aliases(tree)
+    found: Counter[str] = Counter()
+    for handler in ast.walk(tree):
+        if not isinstance(handler, ast.ExceptHandler):
+            continue
+        for statement in handler.body:
+            for node in ast.walk(statement):
+                if isinstance(node, ast.Call):
+                    name = _canonical(_dotted(node.func), aliases)
+                    if name in _UNSAFE_FALLBACKS or name.startswith(_UNSAFE_FALLBACK_PREFIXES):
+                        found[ast.dump(node)] += 1
+    return found
+
+
+def _secret_logs(tree: ast.Module) -> Counter[str]:
+    """Logging or print calls that write a secret: a value named like one (`password`,
+    `cfg["api_key"]`), or a "password=" field joined with data (%, +, .format, f-string)."""
+    aliases = _aliases(tree)
+    found: Counter[str] = Counter()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _is_log_call(node, aliases) and _exposes_secret(node):
+            found[ast.dump(node)] += 1
+    return found
+
+
+def _is_log_call(call: ast.Call, aliases: dict[str, str]) -> bool:
+    name = _canonical(_dotted(call.func), aliases)
+    if name == "print" or name.startswith("logging."):
+        return True
+    func = call.func
+    if not (isinstance(func, ast.Attribute) and func.attr in _LOG_METHODS):
+        return False
+    receiver = func.value
+    if isinstance(receiver, ast.Call):  # logging.getLogger(__name__).info(...)
+        return _dotted(receiver.func).endswith("getLogger")
+    owner = _dotted(receiver).rsplit(".", 1)[-1].lower()
+    return owner in _LOGGER_NAMES or owner.endswith(("logger", "_log"))
+
+
+def _exposes_secret(call: ast.Call) -> bool:
+    values = [*call.args, *(keyword.value for keyword in call.keywords)]
+    nodes = [node for value in values for node in ast.walk(value)]
+    if any(_names_a_secret(node) for node in nodes):
+        return True
+    has_data = any(
+        isinstance(n, ast.Name | ast.Attribute | ast.Subscript | ast.Call) for n in nodes
+    )
+    field = any(
+        isinstance(n, ast.Constant) and isinstance(n.value, str) and _SECRET_FIELD.search(n.value)
+        for n in nodes
+    )
+    return has_data and field
+
+
+def _names_a_secret(node: ast.AST) -> bool:
+    if isinstance(node, ast.Name):
+        return _is_secret_name(node.id)
+    if isinstance(node, ast.Attribute):
+        return _is_secret_name(node.attr)
+    if isinstance(node, ast.Subscript):  # cfg["password"]
+        key = node.slice
+        return (
+            isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+            and _is_secret_name(key.value)
+        )
+    return False
+
+
+def _is_secret_name(name: str) -> bool:
+    parts = [part.lower() for part in _IDENTIFIER_PART.findall(name)]
+    if any(part in _SECRET_PARTS for part in parts):
+        return True
+    return any(pair in _SECRET_PAIRS for pair in itertools.pairwise(parts))
+
+
+def _secret_defaults(tree: ast.Module) -> Counter[str]:
+    """A secret with a hardcoded value when unset: `os.getenv("API_TOKEN", "x")`, also with
+    `default=`, or `os.environ.get("API_TOKEN") or "x"`."""
+    aliases = _aliases(tree)
+    found: Counter[str] = Counter()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _secret_lookup(node, aliases):
+            default = node.args[1] if len(node.args) > 1 else _keyword(node, "default")
+            if _str_constant(default):
+                found[ast.dump(node)] += 1
+        elif isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+            first, rest = node.values[0], node.values[1:]
+            lookup = isinstance(first, ast.Call) and _secret_lookup(first, aliases)
+            if lookup and any(_str_constant(value) for value in rest):
+                found[ast.dump(node)] += 1
+    return found
+
+
+def _secret_lookup(call: ast.Call, aliases: dict[str, str]) -> bool:
+    if _canonical(_dotted(call.func), aliases) not in _ENV_LOOKUPS or not call.args:
+        return False
+    key = _str_constant(call.args[0])
+    return bool(key and _is_secret_name(key))
+
+
+def _weakened_permissions(tree: ast.Module) -> Counter[str]:
+    """A umask that lets others write (umask(0)) and chmod modes writable by others, with the
+    mode as a number, a keyword or stat constants (`stat.S_IRWXU | stat.S_IWOTH`)."""
+    aliases = _aliases(tree)
+    found: Counter[str] = Counter()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _canonical(_dotted(node.func), aliases)
+        method = isinstance(node.func, ast.Attribute) and node.func.attr == "chmod"
+        if name == "os.umask":
+            mode = _mode(node.args[0] if node.args else _keyword(node, "mask"), aliases)
+            if mode is not None and not mode & 0o002:
+                found[ast.dump(node)] += 1
+        elif name in _CHMOD_CALLS or method:
+            index = 1 if name in _CHMOD_CALLS else 0
+            given = node.args[index] if len(node.args) > index else _keyword(node, "mode")
+            mode = _mode(given, aliases)
+            if mode is not None and mode & 0o002:
+                found[ast.dump(node)] += 1
+    return found
+
+
+def _mode(node: ast.expr | None, aliases: dict[str, str]) -> int | None:
+    """A permission value: a number, a stat.S_* constant, or their | and + combinations."""
+    if node is None:
+        return None
+    if isinstance(node, ast.Constant) and type(node.value) is int:
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr | ast.Add):
+        left, right = _mode(node.left, aliases), _mode(node.right, aliases)
+        return None if left is None or right is None else left | right
+    name = _canonical(_dotted(node), aliases)
+    if name.startswith("stat.S_"):
+        value = getattr(stat, name.removeprefix("stat."), None)
+        return value if isinstance(value, int) else None
+    return None
+
+
+def _keyword(call: ast.Call, name: str) -> ast.expr | None:
+    return next((keyword.value for keyword in call.keywords if keyword.arg == name), None)
+
+
+def _str_constant(node: ast.expr | None) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+_HABITS = (
+    (_unsafe_fallbacks, "keeps a risky call as a fallback in an exception handler"),
+    (_secret_logs, "logs a value that looks like a secret"),
+    (_secret_defaults, "gives a secret a hardcoded fallback value"),
+    (_weakened_permissions, "clears the umask or makes a file writable by others"),
+)

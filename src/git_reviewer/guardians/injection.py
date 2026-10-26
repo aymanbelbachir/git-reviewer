@@ -1,9 +1,11 @@
 """Anti-injection guardian, before and after the LLM review (docs/ARCHITECTURE.md §10.1).
 
-Before: the deterministic barrier scans the diff; when it only suspects something, an isolated
-guardian agent classifies the flagged passages (with their neighbours) and may raise to "block".
-Passages are sent in batches that fit the guardian's context; when they need too many batches,
-the change is blocked rather than partly checked.
+Before: the deterministic barrier scans the diff. Unless it blocks, an isolated guardian agent
+classifies the flagged passages and every added comment, string and line of a non-Python file
+(where text addressed to an AI hides; a fixed phrase list misses most of it), each with its
+neighbours, and may raise to "suspect" or "block". Passages are sent in batches that fit the
+guardian's context: flagged ones that need too many batches block the change; other lines left
+over raise an alert.
 After: the reviewer's output must not contain the canary token (block) or the delimiter nonce
 (suspect), even escaped, re-cased or split by punctuation; and every static finding of medium
 severity or more must be mentioned by the reviewer without being downgraded, otherwise a
@@ -14,6 +16,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import unicodedata
 from collections.abc import Iterator
 
@@ -32,6 +35,10 @@ from git_reviewer.models import (
 )
 
 _SCANNERS = frozenset({"ruff", "bandit", "gitleaks"})
+_PYTHON_SUFFIXES = (".py", ".pyi", ".pyw")
+_PROSE_MARKERS = re.compile(r"[#'\"]")
+# Four or more words in a row: prose, whatever the line looks like.
+_SENTENCE = re.compile(r"[^\W\d_]{2,}(?:[\s,.;:!?'\"-]+[^\W\d_]{2,}){3,}")
 _CONTEXT_LINES = 1
 _CROSS_CHECK_DISTANCE = 2
 _DISMISSALS = (
@@ -46,16 +53,45 @@ _DISMISSALS = (
 def guard_before_review(diff: Diff, chat: ChatFn, *, context_tokens: int) -> list[Decision]:
     result = barriers.scan(diff)
     found = [decision("injection.barrier", result.verdict, result.reasons, result.lines)]
-    if result.verdict != "suspect":
+    if result.verdict == "block":
+        return found
+    flagged = _passages(diff, result.flagged) if result.flagged else []
+    seen = set(flagged)
+    prose = [row for row in _passages(diff, _prose_lines(diff)) if row not in seen]
+    if not flagged and not prose:
         return found
     found += run_guardian_batches(
         "injection.agent",
         chat,
         prompts.INJECTION_GUARDIAN_SYSTEM_PROMPT,
         prompts.injection_guardian_user_prompt,
-        _passages(diff, result.flagged),
+        flagged,
         context_tokens=context_tokens,
+        optional=prose,
     )
+    return found
+
+
+def _prose_lines(diff: Diff) -> list[PatchLine]:
+    """Added lines where text for a reader can hide. In Python files: comments and strings (a
+    comment marker or a quote on the line, a line inside a triple-quoted string such as a docstring
+    body) and, as a fail-safe when that count is wrong (a docstring opened above the hunk), any
+    line that reads like a sentence. In other files: every line, lockfiles included (any file can
+    be named uv.lock, and a change small enough for the reviewer fits the guardian's budget)."""
+    found: list[PatchLine] = []
+    inside: dict[str, bool] = {}
+    for line in patch_lines(diff):
+        if line.kind == "-":
+            continue
+        python = line.path.lower().endswith(_PYTHON_SUFFIXES)
+        was_inside = inside.get(line.path, False)
+        if python and (line.text.count('"""') + line.text.count("'''")) % 2:
+            inside[line.path] = not was_inside
+        if line.kind != "+" or not line.text.strip():
+            continue
+        prose = was_inside or _PROSE_MARKERS.search(line.text) or _SENTENCE.search(line.text)
+        if not python or prose:
+            found.append(line)
     return found
 
 

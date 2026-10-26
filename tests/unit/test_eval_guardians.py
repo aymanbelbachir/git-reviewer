@@ -223,3 +223,15 @@ def test_committed_dataset_is_valid_and_large_enough() -> None:
         found = [s for s in samples if s.guardian == guardian]
         assert sum(s.label == "malicious" for s in found) >= 20, guardian
         assert sum(s.label == "clean" for s in found) >= 5, guardian
+
+
+def test_samples_are_split_into_dev_and_test(tmp_path: Path) -> None:
+    for number, label in ((1, "malicious"), (2, "malicious"), (21, "clean"), (22, "clean")):
+        store(tmp_path, sample(f"exe-{number:04d}", "execution", label, {"diff": TEST_DIFF}))
+    samples = ev.load_samples(tmp_path)
+    assert [s.split for s in samples] == ["dev", "test", "dev", "test"]
+    llm = FakeLLM(guardian=guardian_json("block"))
+    summary = ev.summarize([ev.evaluate(s, llm, context_tokens=32_768) for s in samples])
+    splits = summary["execution"]["splits"]
+    assert splits["dev"]["detected"] == 1 and splits["test"]["false_positives"] == 1
+    assert [r["split"] for r in summary["execution"]["results"]] == ["dev", "test", "dev", "test"]

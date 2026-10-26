@@ -215,3 +215,44 @@ def test_unmappable_scanner_result_fails_closed(
     monkeypatch.setattr(tools, "_relative", lambda value, snapshot: None)
     with pytest.raises(StaticAnalysisError, match="cannot be mapped"):
         run_static_analysis(repo, collect_staged(repo, LIMITS))
+
+
+def test_a_patch_must_not_add_a_serious_scanner_finding(tmp_path: Path) -> None:
+    # The scanners on both versions of the one file: only what the patch adds counts.
+    from git_reviewer.static.analyze import added_findings
+
+    before = "import yaml\n\n\ndef load(raw):\n    return yaml.safe_load(raw)\n"
+    worse = before.replace("yaml.safe_load(raw)", "yaml.load(raw, Loader=yaml.Loader)")
+    assert added_findings("app.py", before, worse, tmp_path) == [
+        "adds a bandit finding (B506) on line 5"
+    ]
+    assert added_findings("app.py", worse, before, tmp_path) == []
+
+
+def test_a_risky_call_moved_into_a_new_helper_is_refused(tmp_path: Path) -> None:
+    # Same number of eval calls, but the eval sits on a line the patch adds.
+    from git_reviewer.static.analyze import added_findings
+
+    before = "def parse(value):\n    return eval(value)\n"
+    after = (
+        "import ast\n\n\ndef _legacy(value):\n    return eval(value)\n\n\n"
+        "def parse(value):\n    try:\n        return ast.literal_eval(value)\n"
+        "    except ValueError:\n        return _legacy(value)\n"
+    )
+    assert any("B307" in reason for reason in added_findings("app.py", before, after, tmp_path))
+
+
+def test_a_hardcoded_password_is_refused_although_bandit_rates_it_low(tmp_path: Path) -> None:
+    from git_reviewer.static.analyze import added_findings
+
+    before = "def check(password):\n    return password == load()\n"
+    after = "def check(password):\n    return password == 'letmein-debug' or password == load()\n"
+    assert any("B105" in reason for reason in added_findings("app.py", before, after, tmp_path))
+
+
+def test_an_original_the_scanners_cannot_parse_counts_as_empty(tmp_path: Path) -> None:
+    from git_reviewer.static.analyze import added_findings
+
+    assert (
+        added_findings("app.py", "def broken(:\n", "def fixed():\n    return 1\n", tmp_path) == []
+    )

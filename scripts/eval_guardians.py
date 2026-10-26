@@ -4,12 +4,14 @@ SECURITY.md §7). Run by hand or by the red-team skill:
     uv run --locked python scripts/eval_guardians.py [--guardian NAME] [--format text|json]
 
 Each sample goes through its guardian as in a real review:
-- injection: the "before" step, the deterministic barrier then the agent on what it flags;
+- injection: the "before" step, the deterministic barrier then the agent on the flagged lines and
+  every added comment, string and non-Python line;
 - execution: the agent on the changed test infrastructure (its argv barrier does not read code);
 - patch: the patch auditor on the finding and the patch, built like the fix loop builds it.
 A sample counts as detected when the verdict is "suspect" or "block". The report also shows what
-the deterministic layer catches alone (the barrier; patch.checks for patches), and for patches the
-whole pipeline, where those rules run first and have the final say.
+the deterministic layer catches alone (the barrier; for patches, patch.checks then ruff, bandit and
+gitleaks on both versions), and for patches the whole pipeline, where those rules run first and
+have the final say. Samples are split into "dev" and "test" (see Sample.split).
 
 Samples are data: they are parsed, never executed. The model is the configured guardian model on
 the loopback Ollama, checked as `git-reviewer review` checks it.
@@ -22,6 +24,7 @@ import ast
 import datetime
 import json
 import sys
+import tempfile
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,19 +35,27 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from git_reviewer import sanitize
 from git_reviewer.config import ConfigError, load_settings
 from git_reviewer.git.diff import DiffError, DiffLimits, from_patch
+from git_reviewer.git.snapshot import SnapshotError
 from git_reviewer.guardians import execution, injection, patch_auditor
 from git_reviewer.guardians.base import FAILURE_PREFIX, worst
 from git_reviewer.llm.ollama import OllamaError, check_model, exposure_warnings, validate_url
 from git_reviewer.llm.structured import ChatFn, ollama_chat
 from git_reviewer.models import Decision, FixTarget, Verdict
 from git_reviewer.patch import checks, edits
+from git_reviewer.proc import ProcError
+from git_reviewer.static.analyze import added_findings
+from git_reviewer.static.tools import StaticAnalysisError
 
 DATASETS = Path(__file__).resolve().parents[1] / "tests" / "guardians" / "datasets"
 GUARDIANS = ("injection", "execution", "patch")
 _PREFIXES = {"injection": "inj", "execution": "exe", "patch": "pat"}
 _LIMITS = DiffLimits(max_bytes=256 * 1024, max_files=50, max_line_chars=10_000)
+# Stands for "the reviewed repository" when the scanners run on a patch sample: there is none,
+# and git-reviewer's own .venv (where ruff and bandit live) must not count as one.
+_SCRATCH_ROOT = Path(tempfile.gettempdir()) / "git-reviewer-eval-no-repository"
 
 Guardian = Literal["injection", "execution", "patch"]
+Split = Literal["dev", "test"]
 Label = Literal["malicious", "clean"]
 
 
@@ -77,6 +88,12 @@ class Sample(BaseModel):
     created: str = Field(pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
     input: dict[str, Any]
     expected: Literal["suspect_or_block", "ok"]
+
+    @property
+    def split(self) -> Split:
+        """ "dev" (odd numbers): may guide changes to a guardian. "test" (even numbers): only
+        scored. Rates measured on the samples a change was tuned on overstate it."""
+        return "dev" if int(self.id[-4:]) % 2 else "test"
 
     @model_validator(mode="after")
     def _consistent(self) -> Sample:
@@ -178,6 +195,12 @@ def evaluate(sample: Sample, chat: ChatFn, *, context_tokens: int) -> Outcome:
         added = edits.added_lines(parsed.before, parsed.after)
         found = patch_auditor.audit(target, diff, added, chat, context_tokens=context_tokens)
         rules = checks.problems(target.file, parsed.before, parsed.after)
+        if not rules:  # as in the fix loop: then the scanners on both versions
+            try:
+                rules = added_findings(target.file, parsed.before, parsed.after, _SCRATCH_ROOT)
+            except (StaticAnalysisError, SnapshotError, ProcError, OSError):
+                # Not measurable: the run is refused like any guardian failure.
+                return Outcome(sample, found.verdict, "block", failed=True)
         return Outcome(sample, found.verdict, "block" if rules else "ok", _failed([found]))
     diff = from_patch(parsed.diff, _LIMITS)
     if sample.guardian == "injection":
@@ -223,6 +246,21 @@ def summarize(outcomes: Iterable[Outcome]) -> dict[str, dict[str, Any]]:
                 if guardian == "patch"
                 else None
             ),
+            "splits": {
+                split: _counts([o for o in found if o.sample.split == split])
+                for split in ("dev", "test")
+            },
+            "results": [
+                {
+                    "id": o.sample.id,
+                    "label": o.sample.label,
+                    "split": o.sample.split,
+                    "verdict": o.verdict,
+                    "deterministic": o.deterministic,
+                    "failed": o.failed,
+                }
+                for o in found
+            ],
             "errors": [_brief(o.sample) for o in found if o.failed],
             "misses": [_brief(o.sample) for o in malicious if not o.detected],
             "false_positive_ids": [_brief(o.sample) for o in clean if o.detected],
@@ -261,6 +299,13 @@ def render_text(summary: dict[str, dict[str, Any]], model: str) -> str:
                 f"{guardian}: whole pipeline: {p['detected']}/{s['malicious']} detected, "
                 f"{p['false_positives']}/{s['clean']} false positives"
             )
+        for split, c in s["splits"].items():
+            lines.append(
+                f"{guardian}: {split} split: {c['detected']}/{c['malicious']} detected, "
+                f"{c['false_positives']}/{c['clean']} false positives; whole pipeline "
+                f"{c['pipeline_detected']}/{c['malicious']}, "
+                f"{c['pipeline_false_positives']}/{c['clean']}"
+            )
         for miss in s["misses"]:
             technique = sanitize.one_line(miss["technique"])
             lines.append(f"{guardian}: missed {miss['id']} ({technique})")
@@ -270,6 +315,19 @@ def render_text(summary: dict[str, dict[str, Any]], model: str) -> str:
         for error in s["errors"]:
             lines.append(f"{guardian}: ERROR, the guardian failed on {error['id']}")
     return "\n".join(lines)
+
+
+def _counts(found: list[Outcome]) -> dict[str, int]:
+    malicious = [o for o in found if o.sample.label == "malicious"]
+    clean = [o for o in found if o.sample.label == "clean"]
+    return {
+        "malicious": len(malicious),
+        "detected": sum(o.detected for o in malicious),
+        "pipeline_detected": sum(o.pipeline_detected for o in malicious),
+        "clean": len(clean),
+        "false_positives": sum(o.detected for o in clean),
+        "pipeline_false_positives": sum(o.pipeline_detected for o in clean),
+    }
 
 
 def _rate(part: int, whole: int) -> str:

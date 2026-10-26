@@ -79,18 +79,34 @@ def run_guardian_batches(
     rows: list[Row],
     *,
     context_tokens: int,
+    optional: list[Row] | None = None,
 ) -> list[Decision]:
     """Show every row to the agent, in batches that fit its context window. Nothing is ever
     truncated: rows that need more than MAX_GUARDIAN_CALLS batches, or a row too long for one
-    batch, block, since the agent could not see everything."""
+    batch, block, since the agent could not see everything. `optional` rows are checked with the
+    calls left; those that do not fit raise an alert ("suspect"), not a block."""
     # Every token is at least one UTF-8 byte, so a batch of this many bytes always fits.
     budget = context_tokens - ANSWER_TOKENS - len(system.encode()) - _PROMPT_MARGIN_TOKENS
-    batches = _batches(rows, min(MAX_BATCH_BYTES, budget))
+    max_bytes = min(MAX_BATCH_BYTES, budget)
+    batches = _batches(rows, max_bytes)
     if batches is None or len(batches) > MAX_GUARDIAN_CALLS:
         reason = "too many or too long passages for the guardian to check them all"
         return [decision(source, "block", [reason], [ref for _text, ref in rows])]
+    fitting = [row for row in optional or [] if len(row[0].encode()) + 1 <= max_bytes]
+    too_long = [ref for text, ref in optional or [] if len(text.encode()) + 1 > max_bytes]
+    extra = _batches(fitting, max_bytes) or []
+    room = MAX_GUARDIAN_CALLS - len(batches)
+    left_over = [ref for _text, shown in extra[room:] for ref in sorted(shown, key=_ref_key)]
     found: list[Decision] = []
-    for text, shown in batches:
+    if too_long:
+        reason = f"{len(too_long)} line(s) too long for the guardian were not checked"
+        found.append(decision(source, "suspect", [reason], too_long))
+    if left_over:
+        # Rows are single lines joined with newlines: count rows, not shared line references.
+        count = sum(text.count("\n") + 1 for text, _shown in extra[room:])
+        reason = f"{count} more line(s) were not checked: too many for the guardian's calls"
+        found.append(decision(source, "suspect", [reason], left_over))
+    for text, shown in [*batches, *extra[:room]]:
         user = user_prompt(text, prompts.new_nonce())
         found.append(run_guardian(source, chat, system, user, allowed_lines=shown))
     return found
@@ -116,3 +132,7 @@ def _batches(rows: list[Row], max_bytes: int) -> list[tuple[str, frozenset[LineR
     if texts:
         batches.append(("\n".join(texts), frozenset(shown)))
     return batches
+
+
+def _ref_key(ref: LineRef) -> tuple[str, int]:
+    return ref.file, ref.line

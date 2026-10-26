@@ -1,6 +1,6 @@
 # git-reviewer: architecture plan
 
-Status: phases 2 to 7 are implemented as described here. The guardians' measured detection and
+Status: phases 2 to 8 are implemented as described here. The guardians' measured detection and
 false-positive rates are in SECURITY.md §7. Every design decision below states its security rationale; threat IDs
 (`T-xx`) refer to [SECURITY.md](../SECURITY.md).
 
@@ -83,7 +83,8 @@ src/git_reviewer/
   patch/
     author.py          # LLM patch proposal (structured edits, not free-form diffs)
     policy.py          # deterministic path rules (final say)
-    checks.py          # deterministic AST checks: new imports, network calls, weakened tests
+    checks.py          # deterministic AST checks: new imports, network calls, weakened tests,
+                       # unsafe fallbacks, logged secrets, weakened permissions
     apply.py           # TOCTOU re-checks, then the validated content written to the working tree
   graph/
     state.py nodes.py build.py
@@ -469,13 +470,20 @@ Before the review:
     Greek) → **suspect**, since no phrase pattern would match it. Kanji and kana count as one
     script. A word written entirely in look-alike letters of one script is not detected (T-07
     residual).
-- Agent: called only when the barrier says "suspect" (a block is already final). It receives the
-  flagged lines with one neighbour on each side, nonce-delimited, and may raise to "block". Line
-  references it returns that it was not shown are dropped.
+- Agent: called unless the barrier blocks (a block is already final). It receives the flagged
+  lines and every added comment and string of a Python file (a line with `#` or a quote, the body
+  of a triple-quoted string, and, as a fail-safe when that guess is wrong, any line with four or
+  more words in a row), and every added line of other files (READMEs, docs, configuration,
+  lockfiles: any file can be named `uv.lock`), each with one neighbour on each side,
+  nonce-delimited. A fixed phrase list misses most text addressed to a reviewer ("this call
+  was approved"), so the agent reads it all and may raise to "suspect" or "block". Line references
+  it returns that it was not shown are dropped. Cost: one model call on most commits.
 - The passages are sent in batches of at most 20,000 UTF-8 bytes, fewer when the context window is
   small (every token is at least one byte, so a batch always fits next to the system prompt and the
-  answer). Nothing is truncated: more than 5 batches, or a single line too long for one batch, is a
-  **block**, since the guardian could not see everything.
+  answer). Nothing is truncated: flagged passages that need more than 5 batches, or a flagged line
+  too long for one batch, are a **block**, since the guardian could not see everything. The other
+  lines are checked with the calls left; those that do not fit, or are too long, raise an alert
+  naming them (with the default context, a change small enough for the reviewer always fits).
 
 After the review:
 - Canary: a random 128-bit token in the reviewer's system prompt; if it appears anywhere in the
@@ -559,8 +567,15 @@ After the sandbox runs (also when a run failed):
    `getattr(os, "system")` and getattr on computed names; long literals; invisible characters;
    catch-all `except`, also in a tuple; and in test files any removed or changed assertion or test,
    any new skip/xfail/SkipTest/skipTest, and any new early `return`/`raise` or constant condition
-   inside a test; added lines longer than 300 characters, which the user could not read in full,
-   are refused too); then the execution
+   inside a test; a risky call kept as a fallback in an exception handler; a logging or print call
+   that writes a value named like a secret or a "password=%s" field; an environment lookup of a
+   secret with a hardcoded fallback; a cleared umask or a world-writable chmod; added lines longer
+   than 300 characters, which the user could not read in full, are refused too; offending calls
+   are compared, not counted, so swapping one for another is refused); then ruff, bandit and
+   gitleaks on both versions of the file: a patch is refused when a finding of medium severity or
+   more, a hardcoded password or a secret lands on a line it adds or changes (also a risky call
+   moved into a new helper), or when one rule's count goes up. These are denylists: they refuse
+   the common forms, not every possible one (SECURITY.md T-03); then the execution
    guardian (argv barrier, and the agent when the file is test infrastructure); then the sandbox
    run of pytest on the copy with the patch (the copy is restored to the reviewed version
    afterwards), followed by the fingerprint and leftover-container checks; then, for a scanner
@@ -691,7 +706,9 @@ exec '/absolute/path/to/git-reviewer' review --hook --mode block
   `{id, guardian, label: malicious|clean, technique, description, source, created, input, expected}`,
   with `input` = `{diff}` for the anti-injection and execution guardians and `{finding, before,
   after}` for the patch auditor (the diff is built from them as the fix loop builds it).
-  `scripts/eval_guardians.py` validates every sample (a diff that parses with every added line in
+  Samples with an odd number form the "dev" split, which may guide changes to a guardian; even
+  numbers form the "test" split, only scored, and the report gives both, plus each sample's
+  verdict. `scripts/eval_guardians.py` validates every sample (a diff that parses with every added line in
   a hunk, test infrastructure for the execution guardian, a patch that changes valid Python, the
   right directory, unique ids), refuses a run with a guardian failure or without both kinds of
   samples, runs each guardian as a review does, and computes per guardian the detection rate
@@ -711,3 +728,4 @@ exec '/absolute/path/to/git-reviewer' review --hook --mode block
 | 5 | `patch/*` (author, edits, policy, checks, apply), `guardians/patch_auditor.py`, `graph/fix.py` |
 | 6 | `hook/install.py`, `install-hook` / `uninstall-hook`, the hook line in `doctor` |
 | 7 | deferred gaps closed (scanner line ranges, doctest files, hook binary in another worktree), homoglyph detection, guardian instructions extended, `scripts/eval_guardians.py`, security suite index, final audit; guardian datasets (60 malicious from the user's examples, 21 clean) and the first measured rates |
+| 8 | guardian improvements: dev/test split in the evaluation, the anti-injection agent reads every comment and string, patch rules for unsafe fallbacks, logged secrets, secret fallbacks, permissions and new scanner findings |

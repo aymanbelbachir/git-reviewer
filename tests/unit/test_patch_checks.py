@@ -158,3 +158,120 @@ def test_a_utf8_declaration_is_fine() -> None:
 def test_deeply_nested_code_is_rejected_not_crashing() -> None:
     nested = APP + "x = " + "-" * 20_000 + "1\n"
     assert problems("app.py", APP, nested)
+
+
+# --- half fixes that keep or add a problem (phase 8) -----------------------------------------
+
+BEFORE = """import logging
+import os
+
+
+def parse(value):
+    return int(value)
+"""
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (
+            "    try:\n        return int(value)\n    except ValueError:\n"
+            "        return eval(value)\n",
+            "fallback in an exception handler",
+        ),
+        (
+            "    try:\n        return int(value)\n    except ValueError:\n"
+            "        import yaml\n        return yaml.load(value, Loader=yaml.Loader)\n",
+            "fallback in an exception handler",
+        ),
+        ('    logging.info("token=%s", value)\n    return int(value)\n', "looks like a secret"),
+        ("    password = value\n    print(password)\n    return 1\n", "looks like a secret"),
+        ('    logging.warning(f"bad key {api_key}")\n    return 1\n', "looks like a secret"),
+        ('    return os.getenv("API_TOKEN", "fallback-value")\n', "hardcoded fallback"),
+        ('    return os.getenv("API_TOKEN", default="fallback")\n', "hardcoded fallback"),
+        ('    return os.environ.get("API_TOKEN") or "fallback"\n', "hardcoded fallback"),
+        ('    logging.info("password=%s" % value)\n    return 1\n', "looks like a secret"),
+        ('    logging.info("access_token=" + value)\n    return 1\n', "looks like a secret"),
+        ('    print("key {}".format(api_key))\n    return 1\n', "looks like a secret"),
+        ('    print(cfg["password"])\n    return 1\n', "looks like a secret"),
+        ('    log.info("using " + token)\n    return 1\n', "looks like a secret"),
+        ("    from logging import info\n    info(password)\n    return 1\n", "looks like a secret"),
+        ("    os.chmod(value, mode=0o777)\n    return 1\n", "writable by others"),
+        (
+            "    import stat\n    os.chmod(value, stat.S_IRWXU | stat.S_IWOTH)\n    return 1\n",
+            "writable by others",
+        ),
+        (
+            '    db_password = value\n    logging.debug("%s", db_password)\n    return 1\n',
+            "looks like a secret",
+        ),
+        ("    apiKey = value\n    print(apiKey)\n    return 1\n", "looks like a secret"),
+        ("    os.umask(0)\n    return 1\n", "umask"),
+        ("    os.chmod(value, 0o777)\n    return 1\n", "writable by others"),
+    ],
+)
+def test_half_fixes_are_refused(body: str, message: str) -> None:
+    patched = BEFORE.replace("    return int(value)\n", body)
+    assert any(message in problem for problem in problems("app.py", BEFORE, patched))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "    try:\n        return int(value)\n    except ValueError:\n        return None\n",
+        '    logging.info("parsed value for %s", value)\n    return int(value)\n',
+        '    logging.info("token refreshed")\n    return int(value)\n',
+        '    return os.getenv("APP_MODE", "production")\n',
+        '    return os.getenv("API_TOKEN", "")\n',
+        "    os.umask(0o077)\n    return 1\n",
+        "    os.chmod(value, 0o644)\n    return 1\n",
+        # Not loggers: math.log and an argument parser's error().
+        "    import math\n    return math.log(token)\n",
+        "    parser.error(token)\n    return 1\n",
+        # Words that only contain a secret-like word are not secrets.
+        '    passed = value\n    logging.info("tests passed: %s", passed)\n    return 1\n',
+        "    max_tokens = value\n    print(max_tokens)\n    return 1\n",
+        '    logging.info("bypass: %s", value)\n    return 1\n',
+    ],
+)
+def test_ordinary_code_near_those_patterns_passes(body: str) -> None:
+    patched = BEFORE.replace("    return int(value)\n", body)
+    assert problems("app.py", BEFORE, patched) == []
+
+
+def test_only_running_or_deserializing_calls_count_as_unsafe_fallbacks() -> None:
+    # vars() already in the file, moved into a handler: not an unsafe fallback.
+    before = "def describe(obj):\n    return vars(obj)\n"
+    after = (
+        "def describe(obj):\n    try:\n        return obj.describe()\n"
+        "    except AttributeError:\n        return vars(obj)\n"
+    )
+    assert problems("app.py", before, after) == []
+    moved_eval = before.replace("vars(obj)", "eval(obj)")
+    kept = after.replace("vars(obj)", "eval(obj)")
+    assert any("fallback" in p for p in problems("app.py", moved_eval, kept))
+
+
+@pytest.mark.parametrize(
+    ("before_body", "after_body", "message"),
+    [
+        # One secret log removed, another added: still adds one.
+        (
+            '    logging.info("password=%s", value)\n    return 1\n',
+            '    logging.info("token=%s", value)\n    return 1\n',
+            "looks like a secret",
+        ),
+        # The chmod fixed, the umask cleared instead.
+        (
+            "    os.chmod(value, 0o777)\n    return 1\n",
+            "    os.chmod(value, 0o755)\n    os.umask(0)\n    return 1\n",
+            "umask",
+        ),
+    ],
+)
+def test_swapping_one_bad_pattern_for_another_is_refused(
+    before_body: str, after_body: str, message: str
+) -> None:
+    before = BEFORE.replace("    return int(value)\n", before_body)
+    after = BEFORE.replace("    return int(value)\n", after_body)
+    assert any(message in problem for problem in problems("app.py", before, after))

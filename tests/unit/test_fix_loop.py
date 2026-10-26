@@ -91,8 +91,20 @@ def test_patch_that_does_not_remove_the_finding_is_rejected(repo: Path) -> None:
     assert "bandit still reports B602" in report.fix_attempts[0].reasons[0]
 
 
+def auditor_says(answer: str) -> Callable[[str, str], str]:
+    """A fake guardian model whose answer only the patch auditor gets; the other guardians,
+    which also read the reviewed code, see nothing wrong."""
+
+    def chat(system: str, user: str) -> str:
+        return answer if "auditing a patch" in system else guardian_json("ok")
+
+    return chat
+
+
 def test_auditor_block_rejects_and_is_shown_as_an_alert(repo: Path) -> None:
-    llm = FakeLLM(patch=GOOD, guardian=guardian_json("block", ["changes unrelated code"]))
+    llm = FakeLLM(
+        patch=GOOD, guardian=auditor_says(guardian_json("block", ["changes unrelated code"]))
+    )
     report = fix(repo, llm)
     assert report.fix is None
     assert sources(report)["patch.auditor"] == "suspect"
@@ -179,7 +191,8 @@ def test_secrets_quoted_in_rejection_reasons_are_masked(make_repo: Callable[...,
     token = random_token()
     # In a non-Python file: gitleaks finds it (so it is masked), but it is not the fix target.
     repo = staged(make_repo, {"app.py": VULNERABLE, "settings.toml": f'token = "{token}"\n'})
-    llm = FakeLLM(patch=GOOD, guardian=guardian_json("block", [f"the patch keeps {token}"]))
+    answer = guardian_json("block", [f"the patch keeps {token}"])
+    llm = FakeLLM(patch=GOOD, guardian=auditor_says(answer))
     report = fix(repo, llm)
     reasons = [reason for attempt in report.fix_attempts for reason in attempt.reasons]
     assert reasons and all(token not in reason for reason in reasons)

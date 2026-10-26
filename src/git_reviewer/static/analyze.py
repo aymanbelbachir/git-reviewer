@@ -15,16 +15,18 @@ checks make sure nothing escapes the scanners silently:
 
 from __future__ import annotations
 
+import difflib
 import re
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
 from git_reviewer import sanitize
 from git_reviewer.git.diff import patch_lines
-from git_reviewer.git.snapshot import Snapshot, reviewed_files
+from git_reviewer.git.snapshot import Snapshot, reviewed_files, single_file
 from git_reviewer.guardians.base import decision
-from git_reviewer.models import Decision, Diff, LineRef, Severity, StaticFinding
-from git_reviewer.static.tools import run_bandit, run_gitleaks, run_ruff
+from git_reviewer.models import SEVERITY_RANK, Decision, Diff, LineRef, Severity, StaticFinding
+from git_reviewer.static.tools import StaticAnalysisError, run_bandit, run_gitleaks, run_ruff
 
 _PYTHON_SUFFIXES = (".py", ".pyi", ".pyw")
 _PYTHON_SHEBANG = re.compile(rb"^#![^\n]*\bpython[0-9.]*\b")
@@ -53,6 +55,8 @@ _SCANNER_CONFIG_FILES = frozenset(
     {".gitleaks.toml", ".gitleaksignore", ".bandit", "ruff.toml", ".ruff.toml"}
 )
 _SCANNER_CONFIG_SECTION = re.compile(r"^\s*\[tool\.(ruff|bandit)\b")
+# Hardcoded passwords: rated low by bandit, never acceptable in a patch.
+_ALWAYS_SERIOUS = frozenset({"B105", "B106", "B107"})
 
 
 @dataclass(frozen=True)
@@ -115,6 +119,64 @@ def _on_change(diff: Diff, finding: StaticFinding) -> StaticFinding | None:
         return None
     added = diff.first_added_line(finding.file, *finding.span)
     return None if added is None else finding.model_copy(update={"line": added})
+
+
+def serious_findings(path: str, text: str, repo: Path) -> list[StaticFinding]:
+    """The findings of ruff, bandit and gitleaks on `text` saved as `path` that a patch must not
+    add (docs/ARCHITECTURE.md §11): medium severity or more, and every hardcoded password
+    (bandit's B105-B107 are rated low) or secret. `repo` is the reviewed repository, where no
+    scanner binary may live. Secret values stay in memory: only rule ids leave this function."""
+    with single_file(path, text.encode("utf-8")) as snapshot:
+        found = run_ruff(snapshot, [path], repo)
+        bandit, unparsed = run_bandit(snapshot, [path], repo)
+        leaks, _values = run_gitleaks(snapshot, repo)
+    if unparsed:
+        raise StaticAnalysisError("bandit could not parse the file")
+    medium = SEVERITY_RANK["medium"]
+    return [
+        f
+        for f in (*found, *bandit, *leaks)
+        if SEVERITY_RANK[f.severity] >= medium or f.rule in _ALWAYS_SERIOUS or f.tool == "gitleaks"
+    ]
+
+
+def added_findings(path: str, original: str, patched: str, repo: Path) -> list[str]:
+    """Why the patched version is refused by the scanners: a serious finding on a line the patch
+    adds or changes (also when it only moved there, as into a new helper function), or more
+    serious findings of one rule than before. An original the scanners cannot parse counts as
+    having none."""
+    added = _added_lines(original, patched)
+    after = serious_findings(path, patched, repo)
+    try:
+        before = Counter((f.tool, f.rule) for f in serious_findings(path, original, repo))
+    except StaticAnalysisError:
+        before = Counter()
+    touched = [f for f in after if f.line in added or _span_touches(f.span, added)]
+    reasons = [f"adds a {f.tool} finding ({f.rule}) on line {f.line}" for f in touched]
+    named = {(f.tool, f.rule) for f in touched}
+    more = Counter((f.tool, f.rule) for f in after) - before
+    reasons += [
+        f"adds a {tool} finding ({rule})"
+        for tool, rule in sorted(more)
+        if (tool, rule) not in named
+    ]
+    return list(dict.fromkeys(reasons))
+
+
+def _span_touches(span: tuple[int, int] | None, lines: set[int]) -> bool:
+    return span is not None and any(span[0] <= number <= span[1] for number in lines)
+
+
+def _added_lines(original: str, patched: str) -> set[int]:
+    """Line numbers, in the patched file, of the lines the patch adds or changes."""
+    old, new = original.splitlines(), patched.splitlines()
+    matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
+    return {
+        number + 1
+        for tag, _i1, _i2, j1, j2 in matcher.get_opcodes()
+        if tag in {"replace", "insert"}
+        for number in range(j1, j2)
+    }
 
 
 def suppression_findings(diff: Diff) -> list[StaticFinding]:

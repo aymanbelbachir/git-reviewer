@@ -133,8 +133,9 @@ SECURITY.md; section numbers to docs/ARCHITECTURE.md. The phase in brackets is w
 - G1.2 Barrier: long base64/hex strings that decode to readable text flagged, decoded text re-scanned.
 - G1.3 Barrier: AI-addressed phrases detected after normalization, English and French at least,
   including instructions split across lines and imitations of the data delimiters.
-- G1.4 Agent classifies suspicious passages and returns line references. It sees every flagged
-  passage (in batches); what it cannot see whole blocks.
+- G1.4 Agent classifies the flagged passages and every added comment, string and non-Python line,
+  and returns line references. It sees every flagged passage (in batches; what it cannot see whole
+  blocks); other lines it has no room for raise an alert.
 - G1.5 Canary token in the reviewer system prompt; its presence in the output blocks, also when
   JSON-escaped, re-cased, split by punctuation or written in fullwidth letters.
 - G1.6 Cross-check: a static finding ignored or downgraded by the reviewer raises a probable-injection alert.
