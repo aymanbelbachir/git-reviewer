@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import re
 import sys
 from collections.abc import Iterator
@@ -33,6 +34,8 @@ from git_reviewer.git.refs import RefError
 from git_reviewer.git.snapshot import SnapshotError
 from git_reviewer.graph.build import run_review
 from git_reviewer.graph.state import ReviewContext
+from git_reviewer.hook.install import HookError, install, uninstall
+from git_reviewer.hook.install import status as hook_status
 from git_reviewer.llm.ollama import (
     CloudModelError,
     ModelMissingError,
@@ -188,19 +191,46 @@ def doctor() -> None:
     failed |= not _check_binary("gitleaks", required=True)
     if _check_binary("docker", required=False, note="needed for --run-tests"):
         _check_docker(settings)
+    _check_hook()
     raise typer.Exit(EXIT_ENVIRONMENT if failed else EXIT_OK)
 
 
 @app.command("install-hook")
-def install_hook() -> None:
-    """Install the pre-commit hook (phase 6)."""
-    _fail(EXIT_USAGE, "install-hook arrives in phase 6; not available yet")
+def install_hook(
+    mode: Annotated[
+        Mode, typer.Option("--mode", help="block: findings stop the commit; warn: report only.")
+    ] = Mode.block,
+    chain: Annotated[
+        bool, typer.Option("--chain", help="Keep an existing pre-commit hook and run it first.")
+    ] = False,
+) -> None:
+    """Install the pre-commit hook: the staged changes are reviewed before each commit."""
+    repo = _repo(hook=False)
+    try:
+        result = install(repo, _own_binary(), mode=mode.value, chain=chain)
+    except (HookError, OSError) as exc:
+        _fail(EXIT_USAGE, str(exc))
+    except proc.ProcError as exc:
+        _fail(EXIT_ENVIRONMENT, str(exc))
+    typer.echo(f"Installed {sanitize.one_line(str(result.path))} (mode {mode.value}).")
+    if result.chained is not None:
+        typer.echo(f"Your previous hook runs first: {sanitize.one_line(str(result.chained))}")
+    typer.echo("Skip it once: git commit --no-verify. Remove it: git-reviewer uninstall-hook")
 
 
 @app.command("uninstall-hook")
 def uninstall_hook() -> None:
-    """Remove the pre-commit hook (phase 6)."""
-    _fail(EXIT_USAGE, "uninstall-hook arrives in phase 6; not available yet")
+    """Remove git-reviewer's pre-commit hook and restore a chained one."""
+    repo = _repo(hook=False)
+    try:
+        path, restored = uninstall(repo)
+    except (HookError, OSError) as exc:
+        _fail(EXIT_USAGE, str(exc))
+    except proc.ProcError as exc:
+        _fail(EXIT_ENVIRONMENT, str(exc))
+    typer.echo(f"Removed {sanitize.one_line(str(path))}.")
+    if restored:
+        typer.echo("Your previous pre-commit hook is back in place.")
 
 
 @app.command()
@@ -292,6 +322,22 @@ def _sandbox(settings: Settings) -> Iterator[DockerSandbox]:
         yield sandbox
 
 
+def _check_hook() -> None:
+    """Whether git really runs git-reviewer before each commit in this repository. A warning
+    only: the hook is optional."""
+    try:
+        repo = repo_root(Path.cwd())
+    except (GitError, proc.ProcError):
+        _line("INFO", "pre-commit hook", "not in a git repository")
+        return
+    try:
+        level, message = hook_status(repo)
+    except (HookError, proc.ProcError, OSError) as exc:
+        _line("WARN", "pre-commit hook", f"cannot tell: {exc}")
+        return
+    _line({"ok": "OK", "info": "INFO", "warn": "WARN"}[level], "pre-commit hook", message)
+
+
 def _check_docker(settings: Settings) -> None:
     """Docker is only needed for --run-tests: problems are warnings, not failures."""
     try:
@@ -356,6 +402,12 @@ def _offer_patch(repo: Path, report: Report) -> None:
         f"Applied to {sanitize.one_line(proposal.file)} in the working tree only: nothing was "
         "staged or committed. Check it with: git diff"
     )
+
+
+def _own_binary() -> Path:
+    """The git-reviewer program being run, for the hook to call by its absolute path: `..`
+    removed, symlinks kept (an upgrade through ~/.local/bin keeps working)."""
+    return Path(os.path.normpath(Path(sys.argv[0]).absolute()))
 
 
 def _interactive() -> bool:

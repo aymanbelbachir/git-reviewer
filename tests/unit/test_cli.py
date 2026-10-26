@@ -444,3 +444,108 @@ def test_fix_in_json_mode_is_proposed_never_applied(
     assert proposal["file"] == "app.py" and "check=True" in proposal["diff"]
     assert "patched" not in proposal  # the exact content is never serialized
     assert (fix_repo / "app.py").read_text() == VULNERABLE
+
+
+# --- install-hook / uninstall-hook (phase 6) ----------------------------------------------
+
+
+@pytest.fixture
+def hook_repo(
+    make_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Path:
+    """A repository, a stand-in installed binary, and git configuration from tmp only."""
+    repo = make_repo()
+    monkeypatch.chdir(repo)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    binary = tmp_path / "tools" / "git-reviewer"
+    binary.parent.mkdir()
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(0o755)
+    monkeypatch.setattr(cli, "_own_binary", lambda: binary)
+    return repo
+
+
+def test_install_and_uninstall_hook(hook_repo: Path) -> None:
+    result = runner.invoke(cli.app, ["install-hook", "--mode", "warn"])
+    assert result.exit_code == cli.EXIT_OK, result.output
+    target = hook_repo / ".git" / "hooks" / "pre-commit"
+    assert "Installed" in result.output and "mode warn" in result.output
+    assert "--no-verify" in result.output
+    assert target.read_text().endswith("review --hook --mode warn\n")
+
+    result = runner.invoke(cli.app, ["uninstall-hook"])
+    assert result.exit_code == cli.EXIT_OK, result.output
+    assert "Removed" in result.output and "back in place" not in result.output
+    assert not target.exists()
+
+
+def test_install_hook_refuses_an_existing_hook_then_chains_it(hook_repo: Path) -> None:
+    target = hook_repo / ".git" / "hooks" / "pre-commit"
+    target.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    target.chmod(0o755)
+    result = runner.invoke(cli.app, ["install-hook"])
+    assert result.exit_code == cli.EXIT_USAGE
+    assert "left untouched" in result.output and "--chain" in result.output
+    assert target.read_text() == "#!/bin/sh\nexit 0\n"
+
+    result = runner.invoke(cli.app, ["install-hook", "--chain"])
+    assert result.exit_code == cli.EXIT_OK, result.output
+    assert "previous hook runs first" in result.output
+    result = runner.invoke(cli.app, ["uninstall-hook"])
+    assert "back in place" in result.output
+    assert target.read_text() == "#!/bin/sh\nexit 0\n"
+
+
+def test_uninstall_hook_without_a_hook_is_a_usage_error(hook_repo: Path) -> None:
+    result = runner.invoke(cli.app, ["uninstall-hook"])
+    assert result.exit_code == cli.EXIT_USAGE
+    assert "nothing to remove" in result.output
+
+
+def test_install_hook_rejects_an_unknown_mode(hook_repo: Path) -> None:
+    result = runner.invoke(cli.app, ["install-hook", "--mode", "off"])
+    assert result.exit_code != cli.EXIT_OK
+    assert not (hook_repo / ".git" / "hooks" / "pre-commit").exists()
+
+
+def test_install_hook_outside_a_repository(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(cli.app, ["install-hook"])
+    assert result.exit_code == cli.EXIT_USAGE
+
+
+def test_doctor_reports_the_hook(hook_repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    cli._check_hook()  # pyright: ignore[reportPrivateUsage]
+    assert "not installed (git-reviewer install-hook)" in capsys.readouterr().out
+    runner.invoke(cli.app, ["install-hook"])
+    cli._check_hook()  # pyright: ignore[reportPrivateUsage]
+    assert "[OK  ] pre-commit hook" in capsys.readouterr().out
+    git(hook_repo, "config", "core.hooksPath", ".husky")
+    cli._check_hook()  # pyright: ignore[reportPrivateUsage]
+    assert "core.hooksPath" in capsys.readouterr().out
+
+
+def test_doctor_says_why_it_cannot_tell(
+    hook_repo: Path, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    hooks = hook_repo / ".git" / "hooks"
+    for entry in hooks.iterdir():
+        entry.unlink()
+    hooks.rmdir()
+    hooks.symlink_to(tmp_path)
+    cli._check_hook()  # pyright: ignore[reportPrivateUsage]
+    out = capsys.readouterr().out
+    assert "[WARN] pre-commit hook" in out and "symbolic link" in out
+
+
+def test_doctor_outside_a_repository(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    cli._check_hook()  # pyright: ignore[reportPrivateUsage]
+    assert "not in a git repository" in capsys.readouterr().out

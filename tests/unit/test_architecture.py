@@ -156,3 +156,20 @@ def test_no_git_command_that_stages_commits_or_pushes(path: Path) -> None:
             first = node.elts[0]
             if isinstance(first, ast.Constant) and first.value in _FORBIDDEN_GIT_COMMANDS:
                 pytest.fail(f"{relative(path)} builds a git {first.value} command")
+
+
+# Where the user's own git configuration lives (aliases, pager, diff drivers...). Only the
+# read-only core.hooksPath lookup at hook installation passes them on (docs/ARCHITECTURE.md §7,
+# §13); config.py reads XDG_CONFIG_HOME to find git-reviewer's own settings file.
+_USER_CONFIG_ENV = {"HOME", "XDG_CONFIG_HOME", "GIT_CONFIG_SYSTEM"}
+_USER_CONFIG_ENV_MODULES = {"proc.py", "config.py", "hook/install.py"}
+
+
+@pytest.mark.parametrize("path", modules(), ids=relative)
+def test_user_configuration_is_passed_only_by_hook_installation(path: Path) -> None:
+    if relative(path) in _USER_CONFIG_ENV_MODULES:
+        return
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and node.value in _USER_CONFIG_ENV:
+            pytest.fail(f"{relative(path)} uses {node.value}")

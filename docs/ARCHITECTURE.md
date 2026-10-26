@@ -1,7 +1,7 @@
 # git-reviewer: architecture plan
 
-Status: phases 2 to 5 are implemented as described here; the sections for later phases (hook,
-final audit) are still the plan. Every design decision below states its security rationale; threat IDs
+Status: phases 2 to 6 are implemented as described here; what is left for phase 7 (full security
+suite, guardian datasets, final audit) is still the plan. Every design decision below states its security rationale; threat IDs
 (`T-xx`) refer to [SECURITY.md](../SECURITY.md).
 
 ## 1. Scope
@@ -40,7 +40,7 @@ Rules that follow from the boundary:
    code decides what to run, what to write and whether to block.
 2. Effects live in exactly six modules: `proc` (subprocess), `git.snapshot` (exports the reviewed
    files, or the whole reviewed tree, from git objects into a private temp dir for the scanners
-   and the sandbox), `sandbox.docker`, `patch.apply`, `hook.install` (writes `.git/hooks`) and
+   and the sandbox), `sandbox.docker`, `patch.apply`, `hook.install` (writes the pre-commit hook) and
    `report.write` (report and log files).
    Nothing else may spawn a process or write outside a private temp dir. A unit test enforces this
    by scanning every other module for `subprocess`, `os.system`, `shutil.rmtree`, `open(..., "w"/"a"/"x")`,
@@ -91,8 +91,7 @@ src/git_reviewer/
     render.py          # text / json / markdown renderers over sanitized data
     write.py           # the only writer of report and log files, outside the working tree
   hook/
-    install.py         # install / chain / refuse / uninstall
-    pre-commit.sh.tmpl
+    install.py         # renders the hook script; install / chain / refuse / uninstall
 sandbox/Dockerfile     # sandbox image: base pinned by digest, tools installed with hashes
 sandbox/requirements.txt  # pytest and ruff for the image, pinned with hashes
 scripts/eval_guardians.py   # guardian detection / false-positive metrics (dev tool, not shipped)
@@ -304,7 +303,10 @@ Design rules:
   They are resolved once at startup to absolute paths, from a fixed list of directories; relative
   PATH entries are rejected and a binary located inside the reviewed repository is refused (T-22).
 - Environment: built from scratch (fixed `PATH`, `LANG=C.UTF-8`, the git variables of §6.1). The
-  user's environment is never inherited; the only pass-through is the hook-mode git variables of §6.1.
+  user's environment is never inherited; the only pass-throughs are the hook-mode git variables of
+  §6.1 and, for one read-only `git config --get core.hooksPath` at hook installation (§13), the
+  variables that locate the user's own git configuration (`HOME`, `XDG_CONFIG_HOME`,
+  `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_NOSYSTEM`).
 - Every call has a timeout and an output cap; untrusted values come after `--end-of-options` or `--` (T-21).
 
 ## 8. Sandbox
@@ -591,25 +593,66 @@ After the sandbox runs (also when a run failed):
   sources is never logged (T-26).
 
 ## 13. Git hook
-Hook script (rendered at install time, absolute path of the installed binary):
+`git-reviewer install-hook [--mode block|warn] [--chain]` writes this script, rendered at install
+time with the absolute path of the git-reviewer being run, single-quoted:
 
 ```sh
 #!/bin/sh
-# Installed by git-reviewer: reviews the staged diff before each commit.
+# Installed by git-reviewer: reviews the staged changes before each commit.
 # Mode: block (a finding at or above the threshold stops the commit).
 # Skip once: git commit --no-verify
 # Remove:    git-reviewer uninstall-hook
-exec "/absolute/path/to/git-reviewer" review --hook --mode block
+exec '/absolute/path/to/git-reviewer' review --hook --mode block
 ```
 
-- The hook location comes from `git rev-parse --git-path hooks` (handles worktrees).
-- Existing `pre-commit` hook: refuse by default. With `--chain`, rename it to
-  `pre-commit.chained-by-git-reviewer` and generate a hook that runs it first and stops on its
-  failure; `uninstall-hook` restores it. If the existing hook is a symlink, or `core.hooksPath` is
-  set (husky, pre-commit framework), refuse and print manual instructions.
-- `--mode warn` prints the report and always exits 0.
-- In hook mode: non-interactive, no patch application, sandbox tests only if enabled in the user config.
+- Location: `<git common dir>/hooks/pre-commit`, so one hook serves every linked worktree.
+  (`git rev-parse --git-path hooks` cannot be used: git-reviewer's hardened git calls set
+  `core.hooksPath=/dev/null`.) A `hooks` path that is a symlink or not a directory is refused.
+- `core.hooksPath` set in any configuration file (system, including `GIT_CONFIG_SYSTEM`; global,
+  including `$XDG_CONFIG_HOME` and `GIT_CONFIG_GLOBAL`; repository), even to an empty value, means
+  git never runs `.git/hooks`: a hook installed there would silently do nothing. Installing refuses
+  and prints the exact line (absolute path, chosen mode) to add to that hook manager (husky, the
+  pre-commit framework, a team setting). Configuration passed through the environment
+  (`GIT_CONFIG_COUNT`, `GIT_CONFIG_PARAMETERS`) cannot be checked, so it is refused too. This is
+  the only git call that reads the user's own configuration; `git config --get` runs nothing.
+- An existing `pre-commit` is never overwritten. Without `--chain`, installing refuses and prints
+  the line to add by hand. With `--chain`, it is kept as `pre-commit.chained-by-git-reviewer` and
+  the new hook runs it first (`'.../pre-commit.chained-by-git-reviewer' "$@" || exit $?`), so its
+  failure stops the commit before the review. The original is hard-linked to the new name (which
+  fails if the name exists) and the new hook renamed over the old name: there is never a moment
+  without a hook, and a failure only removes the extra link. Chaining is refused when the hook is
+  not executable (git ignores it today; chaining would start running it) or reads its own name
+  (`$0`, as husky v4 and overcommit do: renamed, it would silently do nothing). A hook that is a
+  symlink or not a regular file is refused.
+- git-reviewer's own hook is recognized only when the file is exactly a script it would write;
+  one changed by hand is never replaced or removed. Re-installing (another mode, a new binary, the
+  repository moved) keeps the chain, at the chained hook's current path. `uninstall-hook` works
+  whatever `core.hooksPath` says: it removes git-reviewer's hook, or renames the chained one over
+  it in one step, after checking the chained file is a regular file. A `pre-commit.chained-by-
+  git-reviewer` without the hook that runs it (an interrupted install, a hook deleted by hand) is
+  never ignored: install, uninstall and `doctor` say where it is and print the `mv` that restores it.
+- Writing: a new file (`O_EXCL | O_NOFOLLOW`, mode 0755 less the umask; refused if the umask
+  would leave it unreadable or not executable for its owner) is hard-linked into place, which fails
+  if the name appeared meanwhile; only git-reviewer's own hook is ever replaced (by rename).
+- The binary must be an absolute path to an executable outside the repository, both as given and
+  resolved: a file or a symlink in the repository is content the branch under review controls.
+  "Outside" is decided by file identity (device and inode of every parent), not by name, since
+  macOS file systems ignore case and Unicode normalization. Like the binaries `proc` runs, it and
+  its directory must not be writable by group or others. A quote, newline or NUL in the binary or
+  hooks path is refused (the script single-quotes them).
+- Modes. `block`: findings at or above the threshold exit 1 and stop the commit. `warn`: findings
+  and resource-limit "not reviewed" results never stop the commit; security blocks (exit 2) and an
+  unusable environment (exit 4: Ollama, a model or gitleaks missing) still do, fail-closed. The
+  user skips one commit with `--no-verify`.
+- In hook mode: non-interactive, `--fix` and `--range` refused, no sandbox tests (`--run-tests` is
+  a manual option, too slow for every commit). `GIT_INDEX_FILE` and the other hook variables of
+  §6.1 are passed through, so the review reads exactly the index being committed (`git commit -a`
+  and `git commit <paths>` use a temporary one).
 - `--no-verify` skips the hook. The hook is a convenience for the user, not a security boundary.
+- `doctor` says whether git really runs git-reviewer before each commit, and warns when it would
+  not: the hook or its chained hook not executable, the binary gone (a deleted virtualenv, a
+  pruned cache), the repository moved (the script names the chained hook's old path, so every
+  commit fails until `install-hook` is run again), a parked chained hook, or a state it cannot read.
 
 ## 14. Supply chain and CI
 - Runtime dependencies: `typer`, `pydantic`, `langgraph`, `langchain-ollama` (and their transitive
@@ -644,5 +687,5 @@ exec "/absolute/path/to/git-reviewer" review --hook --mode block
 | 3 | `static/*`, `llm/prompts.py`, `llm/structured.py`, `graph/*` without sandbox, `report/*`, `sanitize.py`, injection guardian |
 | 4 | `git/snapshot.py` tree export, `sandbox/*`, `sandbox/Dockerfile`, execution guardian |
 | 5 | `patch/*` (author, edits, policy, checks, apply), `guardians/patch_auditor.py`, `graph/fix.py` |
-| 6 | `hook/*` |
+| 6 | `hook/install.py`, `install-hook` / `uninstall-hook`, the hook line in `doctor` |
 | 7 | full security suite, guardian datasets ≥ 20 per guardian, `/red-team`, `/security-gate`, final audit |

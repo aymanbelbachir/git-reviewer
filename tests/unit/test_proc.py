@@ -49,7 +49,6 @@ def test_environment_is_built_from_scratch(monkeypatch: pytest.MonkeyPatch, tmp_
     [
         "LD_PRELOAD",
         "PYTHONPATH",
-        "HOME",
         "PATH",
         "DOCKER_HOST",
         "GIT_EXTERNAL_DIFF",

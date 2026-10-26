@@ -44,9 +44,11 @@ BASE_ENV: Mapping[str, str] = {
     "LC_ALL": "C.UTF-8",
 }
 # Extra variables a caller may add, by exact name: git hardening flags and the hook-mode index
-# (docs/ARCHITECTURE.md §6.1), and the private Docker config dir (§8.3). A prefix such as GIT_*
-# would also admit GIT_EXTERNAL_DIFF, GIT_EXEC_PATH or GIT_CONFIG_PARAMETERS, which run programs
-# or re-enable the configuration the hardening turns off.
+# (docs/ARCHITECTURE.md §6.1), the private Docker config dir (§8.3), and HOME, XDG_CONFIG_HOME
+# and GIT_CONFIG_SYSTEM, which only hook installation passes so that git reads the user's own
+# configuration (to find core.hooksPath, §13). A prefix such as GIT_* would also admit
+# GIT_EXTERNAL_DIFF, GIT_EXEC_PATH or GIT_CONFIG_PARAMETERS, which run programs or re-enable the
+# configuration the hardening turns off.
 ALLOWED_EXTRA_ENV_NAMES = frozenset(
     {
         "GIT_CONFIG_NOSYSTEM",
@@ -60,6 +62,9 @@ ALLOWED_EXTRA_ENV_NAMES = frozenset(
         "GIT_WORK_TREE",
         "GIT_COMMON_DIR",
         "DOCKER_CONFIG",
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "GIT_CONFIG_SYSTEM",
     }
 )
 
@@ -113,7 +118,7 @@ def resolve_binary(name: str, *, forbidden_root: Path | None = None) -> Path:
         if not candidate.is_file() or not os.access(candidate, os.X_OK):
             continue
         resolved = candidate.resolve(strict=True)
-        _check_not_writable_by_others(resolved)
+        check_not_writable_by_others(resolved)
         if forbidden_root is not None and resolved.is_relative_to(forbidden_root.resolve()):
             raise UnsafeBinaryError(f"{name} resolves inside the reviewed repository: {resolved}")
         return resolved
@@ -163,7 +168,7 @@ def _search_dirs(name: str) -> tuple[Path, ...]:
     return TRUSTED_DIRS
 
 
-def _check_not_writable_by_others(path: Path) -> None:
+def check_not_writable_by_others(path: Path) -> None:
     for target in (path, path.parent):
         mode = target.stat().st_mode
         if mode & (stat.S_IWGRP | stat.S_IWOTH):

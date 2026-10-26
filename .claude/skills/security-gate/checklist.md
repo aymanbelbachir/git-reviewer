@@ -93,6 +93,12 @@ SECURITY.md; section numbers to docs/ARCHITECTURE.md. The phase in brackets is w
 - R7.4 `--no-verify` is documented.
 - R7.5 In hook mode the review reads the index git is committing (`GIT_INDEX_FILE` passed through),
   with a test using `git commit -a`.
+- R7.6 The hook never runs a program from the repository (binary outside it by file identity, as given
+  and resolved, not writable by others), and refuses symlinked hooks, a symlinked hooks directory,
+  `core.hooksPath` (even empty) and configuration from the environment, with tests.
+- R7.8 Only a hook exactly as git-reviewer writes it is replaced or removed; a parked chained hook is
+  never ignored; `doctor` warns when git would not run the hook.
+- R7.7 Warn mode never lets a security block (exit 2) through.
 
 ## R8. Supply chain [phase 2]
 - R8.1 `uv.lock` is committed; runtime dependencies are minimal (list them, flag anything unexpected).

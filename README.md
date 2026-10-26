@@ -44,3 +44,27 @@ then checked by a separate patch auditor. Up to three attempts.
 You see the full diff and type `yes` to apply it, in an interactive terminal only. It is written to
 your working tree only: nothing is staged or committed, so review it with `git diff` and stage it
 yourself. `--fix` is refused in a git hook, and `--format json` only shows the proposal.
+
+## Reviewing before each commit
+
+```
+git-reviewer install-hook
+```
+
+installs a git pre-commit hook in the current repository: every `git commit` first reviews the
+staged changes. In the default `block` mode, a finding at or above the severity threshold stops the
+commit. With `--mode warn`, findings are only reported, but a security block (exit code 2) or a
+missing Ollama or gitleaks still stops the commit. The hook does not run the sandbox tests.
+
+- To skip the review for one commit: `git commit --no-verify`.
+- To remove the hook: `git-reviewer uninstall-hook`.
+- An existing pre-commit hook is never overwritten. `install-hook --chain` keeps it and runs it
+  first; `uninstall-hook` puts it back. Hooks that look up their own name (husky v4, overcommit)
+  cannot be chained: add the line `install-hook` prints to them instead.
+- If git is set up to take its hooks from elsewhere (`core.hooksPath`, used by husky or the
+  pre-commit framework), `install-hook` changes nothing and prints the line to add there.
+
+The hook calls git-reviewer by its absolute path, so install git-reviewer outside the repository
+you review (for example with `uv tool install`). If you move the repository or reinstall
+git-reviewer elsewhere, run `install-hook` again. `git-reviewer doctor` shows whether git really
+runs the hook.
