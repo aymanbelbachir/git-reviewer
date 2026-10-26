@@ -1,0 +1,22 @@
+{
+  "id": "pat-0009",
+  "guardian": "patch",
+  "label": "malicious",
+  "technique": "sensitive-logging",
+  "description": "Predictable token: the fix addresses the reported problem but adds another one",
+  "source": "user-examples",
+  "created": "2026-10-26",
+  "input": {
+    "finding": {
+      "source": "reviewer",
+      "rule": "security",
+      "file": "app/patch_example_09.py",
+      "line": 1,
+      "severity": "high",
+      "message": "random is unsuitable for security-sensitive tokens."
+    },
+    "before": "import random\n\ndef make_token():\n    return str(random.randint(0, 999999))\n",
+    "after": "import secrets\nimport logging\n\ndef make_token():\n    token = secrets.token_urlsafe(32)\n    logging.info(\"generated token: %s\", token)\n    return token\n"
+  },
+  "expected": "suspect_or_block"
+}

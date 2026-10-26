@@ -29,6 +29,7 @@ CHAINED_NAME = "pre-commit.chained-by-git-reviewer"
 MARKER = "# Installed by git-reviewer"
 _UNSAFE_PATH_CHARS = frozenset("'\n\r\x00")
 _READ_LIMIT = 64 * 1024
+_MAX_LINK_HOPS = 40
 # Configuration git can also take from the environment; the lookup below cannot be given it
 # (proc passes variables by exact name only).
 _ENV_CONFIG = ("GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS")
@@ -371,28 +372,68 @@ def _check_binary(repo: Path, binary: Path) -> None:
             f"{binary} is not an executable file: run install-hook with the installed "
             "git-reviewer command"
         )
-    # The repository's content is untrusted: the hook must never run a binary from it, nor
-    # through a symbolic link a commit could retarget. Compared by file identity, not by name:
-    # macOS file systems ignore case and Unicode normalization.
-    if _inside(binary, repo) or _inside(binary.resolve(), repo):
-        raise HookError(
-            f"{binary} is inside the repository: install git-reviewer outside it "
-            "(for example with uv tool install) before installing the hook"
-        )
+    # The repository's content is untrusted: the hook must never run a binary from it (any of
+    # its worktrees: the hook serves them all), nor through a symbolic link a commit could
+    # retarget, at any hop of a chain of links. Compared by file identity, not by name: macOS
+    # file systems ignore case and Unicode normalization.
+    hops = _link_chain(binary)
+    for root in (repo, *_worktrees(repo)):
+        if any(_inside(hop, root) for hop in hops):
+            raise HookError(
+                f"{binary} is inside the repository or one of its worktrees, or reaches it "
+                "through a symbolic link: install git-reviewer outside it (for example with uv "
+                "tool install) before installing the hook"
+            )
     try:
-        proc.check_not_writable_by_others(binary.resolve())
+        # The folder holding each link (e.g. ~/.local/bin) and the program they lead to.
+        for hop in hops:
+            proc.check_not_writable_by_others(hop)
     except proc.UnsafeBinaryError as exc:
         raise HookError(f"{exc}: another user could change what the hook runs") from exc
 
 
+def _link_chain(binary: Path) -> list[Path]:
+    """The path given, every symbolic link it goes through, and the resolved program."""
+    hops = [binary]
+    current = binary
+    for _ in range(_MAX_LINK_HOPS):
+        if not current.is_symlink():
+            return [*hops, binary.resolve()]
+        target = current.readlink()
+        current = target if target.is_absolute() else current.parent / target
+        hops.append(current)
+    raise HookError(f"{binary} goes through too many symbolic links")
+
+
+def _worktrees(repo: Path) -> list[Path]:
+    result = run_git(repo, ["worktree", "list", "--porcelain", "-z"])
+    if result.returncode != 0:
+        raise HookError(f"cannot list the worktrees: {stderr_text(result)}")
+    found: list[Path] = []
+    for field in result.stdout.split(b"\0"):
+        if field.startswith(b"worktree "):
+            try:
+                found.append(Path(field[len(b"worktree ") :].decode("utf-8", "strict")))
+            except UnicodeDecodeError as exc:
+                raise HookError("a worktree path is not valid UTF-8") from exc
+    return found
+
+
 def _inside(path: Path, root: Path) -> bool:
-    root_info = root.stat()
-    for parent in (path, *path.parents):
-        try:
+    """Whether `path` is `root` or below it. What cannot be checked is refused, never skipped:
+    a worktree that git lists but that is missing may have been moved by hand and still be used."""
+    try:
+        root_info = root.stat()
+        for parent in (path, *path.parents):
             if os.path.samestat(parent.stat(), root_info):
                 return True
-        except OSError:
-            continue
+    except FileNotFoundError as exc:
+        raise HookError(
+            f"{exc.filename} is missing: if it is a worktree that was moved or deleted, run "
+            "git worktree repair or git worktree prune, then retry"
+        ) from exc
+    except OSError as exc:
+        raise HookError(f"cannot check whether {path} is inside {root}: {exc.strerror}") from exc
     return False
 
 

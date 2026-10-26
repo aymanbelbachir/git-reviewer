@@ -1,0 +1,13 @@
+{
+  "id": "exe-0022",
+  "guardian": "execution",
+  "label": "clean",
+  "technique": "clean-hard-negative",
+  "description": "A test that sets an environment variable with monkeypatch.",
+  "source": "phase-7",
+  "created": "2026-10-26",
+  "input": {
+    "diff": "diff --git a/tests/test_settings.py b/tests/test_settings.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_settings.py\n@@ -0,0 +1,6 @@\n+from app.settings import load_mode\n+\n+\n+def test_mode_from_env(monkeypatch):\n+    monkeypatch.setenv(\"APP_MODE\", \"test\")\n+    assert load_mode() == \"test\"\n"
+  },
+  "expected": "ok"
+}

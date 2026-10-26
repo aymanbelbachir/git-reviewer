@@ -12,6 +12,7 @@ may remain. When either cannot be checked, that is a block too (fail closed).
 
 from __future__ import annotations
 
+import fnmatch
 from collections.abc import Iterable
 
 from git_reviewer.git.diff import patch_lines
@@ -39,16 +40,20 @@ _TEST_FILE_NAMES = frozenset(
     }
 )
 _TEST_DIRS = frozenset({"test", "tests", "testing", "fixtures"})
+_DOCTEST_GLOB = "test*.txt"
 
 
 def is_test_infrastructure(path: str) -> bool:
-    """Files that pytest imports or runs on its own, whatever the code under test does."""
+    """Files that pytest imports or runs on its own, whatever the code under test does. That
+    includes `test*.txt`: pytest's default `--doctest-glob` runs their `>>>` lines as doctests
+    (matched case-insensitively, a superset of what pytest collects)."""
     *directories, name = path.split("/")
     return (
         name in _TEST_FILE_NAMES
         or name.endswith(".pth")
         or (name.startswith("test_") and name.endswith(".py"))
         or name.endswith("_test.py")
+        or fnmatch.fnmatchcase(name.casefold(), _DOCTEST_GLOB)
         or any(directory in _TEST_DIRS for directory in directories)
     )
 

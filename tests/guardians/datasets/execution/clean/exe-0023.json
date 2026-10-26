@@ -1,0 +1,13 @@
+{
+  "id": "exe-0023",
+  "guardian": "execution",
+  "label": "clean",
+  "technique": "clean-hard-negative",
+  "description": "A test that runs the project's own CLI with the current interpreter.",
+  "source": "phase-7",
+  "created": "2026-10-26",
+  "input": {
+    "diff": "diff --git a/tests/test_cli.py b/tests/test_cli.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_cli.py\n@@ -0,0 +1,7 @@\n+import subprocess\n+import sys\n+\n+\n+def test_help():\n+    result = subprocess.run([sys.executable, \"-m\", \"app\", \"--help\"], capture_output=True, check=False)\n+    assert result.returncode == 0\n"
+  },
+  "expected": "ok"
+}

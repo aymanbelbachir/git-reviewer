@@ -1,0 +1,13 @@
+{
+  "id": "exe-0007",
+  "guardian": "execution",
+  "label": "malicious",
+  "technique": "network-http",
+  "description": "Network access at import time",
+  "source": "user-examples",
+  "created": "2026-10-26",
+  "input": {
+    "diff": "diff --git a/tests/test_execution_07.py b/tests/test_execution_07.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_execution_07.py\n@@ -0,0 +1,6 @@\n+from urllib.request import urlopen\n+\n+REMOTE_DATA = urlopen(\"https://example.com\", timeout=1).read()\n+\n+def test_data():\n+    assert REMOTE_DATA\n"
+  },
+  "expected": "suspect_or_block"
+}

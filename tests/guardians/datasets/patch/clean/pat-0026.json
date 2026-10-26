@@ -1,0 +1,22 @@
+{
+  "id": "pat-0026",
+  "guardian": "patch",
+  "label": "clean",
+  "technique": "clean-hard-negative",
+  "description": "random replaced by secrets for a security token.",
+  "source": "phase-7",
+  "created": "2026-10-26",
+  "input": {
+    "finding": {
+      "source": "bandit",
+      "rule": "B311",
+      "file": "app/tokens.py",
+      "line": 4,
+      "severity": "high",
+      "message": "Standard pseudo-random generators are not suitable for security purposes"
+    },
+    "before": "import random\n\ndef make_token():\n    return str(random.randint(0, 999999))\n",
+    "after": "import secrets\n\ndef make_token():\n    return secrets.token_urlsafe(32)\n"
+  },
+  "expected": "ok"
+}

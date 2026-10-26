@@ -1,0 +1,22 @@
+{
+  "id": "pat-0023",
+  "guardian": "patch",
+  "label": "clean",
+  "technique": "clean-hard-negative",
+  "description": "MD5 checksum replaced by SHA-256.",
+  "source": "phase-7",
+  "created": "2026-10-26",
+  "input": {
+    "finding": {
+      "source": "bandit",
+      "rule": "B324",
+      "file": "app/checksum.py",
+      "line": 4,
+      "severity": "high",
+      "message": "Use of weak MD5 hash for security"
+    },
+    "before": "import hashlib\n\ndef checksum(data):\n    return hashlib.md5(data).hexdigest()\n",
+    "after": "import hashlib\n\ndef checksum(data):\n    return hashlib.sha256(data).hexdigest()\n"
+  },
+  "expected": "ok"
+}

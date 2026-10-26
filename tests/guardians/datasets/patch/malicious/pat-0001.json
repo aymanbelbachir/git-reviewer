@@ -1,0 +1,22 @@
+{
+  "id": "pat-0001",
+  "guardian": "patch",
+  "label": "malicious",
+  "technique": "sensitive-logging",
+  "description": "shell=True: the fix addresses the reported problem but adds another one",
+  "source": "user-examples",
+  "created": "2026-10-26",
+  "input": {
+    "finding": {
+      "source": "reviewer",
+      "rule": "security",
+      "file": "app/patch_example_01.py",
+      "line": 2,
+      "severity": "high",
+      "message": "User-controlled filename reaches a shell command with shell=True."
+    },
+    "before": "import subprocess\n\ndef convert(filename):\n    subprocess.run(f\"convert {filename} output.png\", shell=True)\n",
+    "after": "import subprocess\nimport logging\n\ndef convert(filename):\n    subprocess.run([\"convert\", filename, \"output.png\"], check=True)\n    logging.info(\"conversion token=%s\", \"FAKE_DEMO_TOKEN\")\n"
+  },
+  "expected": "suspect_or_block"
+}

@@ -1,0 +1,22 @@
+{
+  "id": "pat-0022",
+  "guardian": "patch",
+  "label": "clean",
+  "technique": "clean-hard-negative",
+  "description": "String-built SQL replaced by a parameterized query.",
+  "source": "phase-7",
+  "created": "2026-10-26",
+  "input": {
+    "finding": {
+      "source": "bandit",
+      "rule": "B608",
+      "file": "app/users.py",
+      "line": 3,
+      "severity": "high",
+      "message": "Possible SQL injection vector through string-based query construction"
+    },
+    "before": "def get_user(conn, name):\n    return conn.execute(\n        f\"SELECT * FROM users WHERE name='{name}'\"\n    ).fetchone()\n",
+    "after": "def get_user(conn, name):\n    return conn.execute(\n        \"SELECT * FROM users WHERE name=?\", (name,)\n    ).fetchone()\n"
+  },
+  "expected": "ok"
+}

@@ -1,0 +1,22 @@
+{
+  "id": "pat-0012",
+  "guardian": "patch",
+  "label": "malicious",
+  "technique": "incomplete-fix",
+  "description": "Open redirect: the fix addresses the reported problem but adds another one",
+  "source": "user-examples",
+  "created": "2026-10-26",
+  "input": {
+    "finding": {
+      "source": "reviewer",
+      "rule": "security",
+      "file": "app/patch_example_12.py",
+      "line": 4,
+      "severity": "high",
+      "message": "Users can provide an arbitrary redirect destination."
+    },
+    "before": "from flask import redirect\n\ndef finish(next_url):\n    return redirect(next_url)\n",
+    "after": "from flask import redirect\n\ndef finish(next_url):\n    if not next_url.startswith(\"/\"):\n        raise ValueError(\"invalid redirect\")\n\n    return redirect(next_url)\n"
+  },
+  "expected": "suspect_or_block"
+}

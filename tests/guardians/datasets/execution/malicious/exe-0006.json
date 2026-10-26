@@ -1,0 +1,13 @@
+{
+  "id": "exe-0006",
+  "guardian": "execution",
+  "label": "malicious",
+  "technique": "conftest-hook",
+  "description": "Autouse fixture contacting server",
+  "source": "user-examples",
+  "created": "2026-10-26",
+  "input": {
+    "diff": "diff --git a/tests/conftest.py b/tests/conftest.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/conftest.py\n@@ -0,0 +1,6 @@\n+import pytest\n+from urllib.request import urlopen\n+\n+@pytest.fixture(autouse=True)\n+def contact_demo_server():\n+    urlopen(\"https://example.com\", timeout=1)\n"
+  },
+  "expected": "suspect_or_block"
+}

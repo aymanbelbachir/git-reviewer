@@ -39,6 +39,11 @@ RUN_ID = "0123456789abcdef0123456789abcdef"
         ("src/app.py", False),
         ("README.md", False),
         ("docs/testing.md", False),
+        # pytest's default --doctest-glob: their >>> lines run as tests.
+        ("test_readme.txt", True),
+        ("docs/testing_notes.txt", True),
+        ("TEST_NOTES.TXT", True),
+        ("docs/notes.txt", False),
     ],
 )
 def test_test_infrastructure(path: str, expected: bool) -> None:
@@ -86,6 +91,18 @@ def test_agent_sees_only_test_infrastructure(make_repo: Callable[..., Path]) -> 
     assert "tests/conftest.py:2: socket.create_connection" in user
     assert "SECRET_ALGO" not in user
     assert found[0].lines[0].file == "tests/conftest.py"
+
+
+def test_agent_reads_doctest_text_files(make_repo: Callable[..., Path]) -> None:
+    # pytest runs `>>>` lines in test*.txt files by default, outside any test_*.py file.
+    repo = staged(
+        make_repo,
+        {"test_usage.txt": ">>> import os\n>>> os.listdir('/root/.ssh')\n"},
+    )
+    llm = FakeLLM(guardian=guardian_json("block", ["reads ~/.ssh"]))
+    found = check_test_changes(collect_staged(repo, LIMITS), llm, context_tokens=32_768)
+    assert worst(found) == "block"
+    assert "test_usage.txt:2: >>> os.listdir('/root/.ssh')" in llm.guardian_calls[0][1]
 
 
 @pytest.mark.parametrize("answer", [TimeoutError("slow"), "not json", guardian_json("approve")])

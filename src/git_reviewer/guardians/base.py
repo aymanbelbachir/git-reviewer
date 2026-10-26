@@ -19,6 +19,7 @@ from git_reviewer.models import VERDICT_RANK, Decision, LineRef, Verdict
 MAX_REASON_CHARS = 300
 MAX_BATCH_BYTES = 20_000
 MAX_GUARDIAN_CALLS = 5
+FAILURE_PREFIX = "guardian failed"
 _PROMPT_MARGIN_TOKENS = 1_024
 
 Row = tuple[str, LineRef]
@@ -63,7 +64,7 @@ def run_guardian(
         output, _raw = ask_json(chat, system, user, GuardianOutput)
     # Fail closed on every error, timeouts and invalid answers included.
     except Exception as exc:
-        return decision(source, "block", [f"guardian failed ({type(exc).__name__}): blocked"])
+        return decision(source, "block", [f"{FAILURE_PREFIX} ({type(exc).__name__}): blocked"])
     lines = [LineRef(file=ref.file, line=ref.line) for ref in output.lines]
     if allowed_lines is not None:
         lines = [ref for ref in lines if ref in allowed_lines]

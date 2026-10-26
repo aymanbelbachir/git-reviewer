@@ -38,6 +38,65 @@ def test_preexisting_issues_are_not_reported(make_repo: Callable[..., Path]) -> 
     assert all(line == 3 for _, _, _, line in rules(repo))
 
 
+QUERY_BEFORE = (
+    "def find(cursor, name):\n"
+    "    query = (\n"
+    '        "SELECT * FROM users "\n'
+    "        \"WHERE name = 'admin'\"\n"
+    "    )\n"
+    "    return cursor.execute(query)\n"
+)
+
+
+def test_finding_reported_on_an_unchanged_line_of_a_changed_statement(
+    make_repo: Callable[..., Path],
+) -> None:
+    # bandit reports the query on line 3 (range 3-4); only line 4, `% name`, is added.
+    repo = make_repo({"db.py": QUERY_BEFORE})
+    after = QUERY_BEFORE.replace("'admin'\"\n", '%s" % name\n')
+    write_files(repo, {"db.py": after})
+    git(repo, "add", "-A")
+    assert ("bandit", "B608", "db.py", 4) in rules(repo)
+
+
+def test_changed_argument_of_a_multi_line_call_reports_the_call(
+    make_repo: Callable[..., Path],
+) -> None:
+    before = (
+        "import subprocess\n\n\ndef run(name):\n    return subprocess.run(\n"
+        '        "ls",\n        shell=True,\n    )\n'
+    )
+    repo = make_repo({"app.py": before})
+    write_files(repo, {"app.py": before.replace('"ls"', '"ls " + name')})
+    git(repo, "add", "-A")
+    found = rules(repo)
+    assert ("bandit", "B602", "app.py", 6) in found
+
+
+def test_statement_untouched_by_the_change_is_still_not_reported(
+    make_repo: Callable[..., Path],
+) -> None:
+    repo = make_repo({"db.py": QUERY_BEFORE.replace("'admin'\"", '%s" % name')})
+    write_files(repo, {"db.py": QUERY_BEFORE.replace("'admin'\"", '%s" % name') + "X = 1\n"})
+    git(repo, "add", "-A")
+    assert not any(rule == "B608" for _, rule, _, _ in rules(repo))
+
+
+def test_new_key_in_an_old_dict_does_not_bring_back_its_findings(
+    make_repo: Callable[..., Path],
+) -> None:
+    # bandit's B104 and B108 report the whole dict as their range: only their own line counts.
+    before = (
+        'SETTINGS = {\n    "host": "0.0.0.0",\n    "cache": "/tmp/app-cache",\n    "port": 80,\n}\n'
+    )
+    repo = make_repo({"settings.py": before})
+    write_files(
+        repo, {"settings.py": before.replace('"port": 80,\n', '"port": 80,\n    "retries": 3,\n')}
+    )
+    git(repo, "add", "-A")
+    assert not any(rule in {"B104", "B108"} for _, rule, _, _ in rules(repo))
+
+
 def test_reviewed_content_is_the_staged_content(make_repo: Callable[..., Path]) -> None:
     repo = make_repo()
     write_files(repo, {"app.py": "x = undefined_name\n"})

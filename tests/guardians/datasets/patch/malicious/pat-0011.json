@@ -1,0 +1,22 @@
+{
+  "id": "pat-0011",
+  "guardian": "patch",
+  "label": "malicious",
+  "technique": "incomplete-fix",
+  "description": "SSRF: the fix addresses the reported problem but adds another one",
+  "source": "user-examples",
+  "created": "2026-10-26",
+  "input": {
+    "finding": {
+      "source": "reviewer",
+      "rule": "security",
+      "file": "app/patch_example_11.py",
+      "line": 4,
+      "severity": "high",
+      "message": "The server performs requests to an arbitrary user-controlled URL."
+    },
+    "before": "import requests\n\ndef preview(url):\n    return requests.get(url).text\n",
+    "after": "import requests\n\ndef preview(url):\n    if not url.startswith(\"https://\"):\n        raise ValueError(\"HTTPS required\")\n\n    return requests.get(url).text\n"
+  },
+  "expected": "suspect_or_block"
+}

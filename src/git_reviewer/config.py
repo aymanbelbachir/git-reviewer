@@ -34,8 +34,9 @@ class Settings(BaseModel):
 
     ollama_url: str = "http://127.0.0.1:11434"
     reviewer_model: str = Field(default="qwen2.5-coder:7b", pattern=_MODEL_NAME)
-    # Separate from the reviewer, as the spec requires; the default is revisited in phase 3 with
-    # the red-team metrics (a different model family resists shared injections better).
+    # Separate from the reviewer, as the spec requires. A model of another family would resist an
+    # injection that fools the reviewer better; the default stays until it can be measured
+    # (SECURITY.md §7).
     guardian_model: str = Field(default="qwen2.5-coder:7b", pattern=_MODEL_NAME)
     ollama_timeout_seconds: float = Field(default=120.0, gt=0, le=600)
     max_diff_bytes: int = Field(default=1024 * 1024, ge=1024, le=5 * 1024 * 1024)

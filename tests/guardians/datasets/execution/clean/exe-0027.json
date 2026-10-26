@@ -1,0 +1,13 @@
+{
+  "id": "exe-0027",
+  "guardian": "execution",
+  "label": "clean",
+  "technique": "clean-hard-negative",
+  "description": "A test server bound to 127.0.0.1 on a free port.",
+  "source": "phase-7",
+  "created": "2026-10-26",
+  "input": {
+    "diff": "diff --git a/tests/test_server.py b/tests/test_server.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_server.py\n@@ -0,0 +1,14 @@\n+import socketserver\n+import threading\n+\n+\n+class Echo(socketserver.BaseRequestHandler):\n+    def handle(self):\n+        self.request.sendall(self.request.recv(64))\n+\n+\n+def test_echo_server_starts():\n+    with socketserver.TCPServer((\"127.0.0.1\", 0), Echo) as server:\n+        thread = threading.Thread(target=server.handle_request, daemon=True)\n+        thread.start()\n+        assert server.server_address[0] == \"127.0.0.1\"\n"
+  },
+  "expected": "ok"
+}

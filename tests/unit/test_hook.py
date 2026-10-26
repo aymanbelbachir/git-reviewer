@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 from collections.abc import Callable
 from pathlib import Path
@@ -588,3 +589,60 @@ def test_binary_inside_the_repository_is_found_whatever_the_case(
     inside.chmod(0o755)
     with pytest.raises(HookError, match="inside the repository"):
         install(repo, swapped / "bin" / "git-reviewer", mode="block", chain=False)
+
+
+def test_binary_inside_another_worktree_is_refused(
+    make_repo: Callable[..., Path], tmp_path: Path
+) -> None:
+    # The hook serves every worktree: a branch checked out in the other one controls that file.
+    repo = make_repo()
+    linked = tmp_path / "linked"
+    git(repo, "worktree", "add", "-q", "-b", "feature", str(linked))
+    inside = linked / ".venv" / "bin" / "git-reviewer"
+    inside.parent.mkdir(parents=True)
+    inside.write_text("#!/bin/sh\n", encoding="utf-8")
+    inside.chmod(0o755)
+    with pytest.raises(HookError, match="one of its worktrees"):
+        install(repo, inside, mode="block", chain=False)
+
+
+def test_symlink_in_a_folder_writable_by_others_is_refused(
+    make_repo: Callable[..., Path], binary: Path, tmp_path: Path
+) -> None:
+    # The hook runs the path as given: whoever can write the folder holding the link can
+    # retarget it.
+    repo = make_repo()
+    shared = tmp_path / "shared-bin"
+    shared.mkdir()
+    (shared / "git-reviewer").symlink_to(binary)
+    shared.chmod(0o777)
+    try:
+        with pytest.raises(HookError, match="writable by group or others"):
+            install(repo, shared / "git-reviewer", mode="block", chain=False)
+    finally:
+        shared.chmod(0o755)
+
+
+def test_a_listed_worktree_that_is_missing_is_refused(
+    make_repo: Callable[..., Path], binary: Path, tmp_path: Path
+) -> None:
+    # Moved by hand, it may still be in use, with a git-reviewer inside it: refuse, never skip.
+    repo = make_repo()
+    linked = tmp_path / "linked"
+    git(repo, "worktree", "add", "-q", "-b", "feature", str(linked))
+    shutil.rmtree(linked)
+    with pytest.raises(HookError, match="git worktree repair or git worktree prune"):
+        install(repo, binary, mode="block", chain=False)
+
+
+def test_a_symlink_chain_through_the_repository_is_refused(
+    make_repo: Callable[..., Path], binary: Path, tmp_path: Path
+) -> None:
+    # Both ends are outside, but the middle link is repository content a checkout can change.
+    repo = make_repo()
+    (repo / "tool-link").symlink_to(binary)
+    outer = tmp_path / "bin"
+    outer.mkdir()
+    (outer / "git-reviewer").symlink_to(repo / "tool-link")
+    with pytest.raises(HookError, match="through a symbolic link"):
+        install(repo, outer / "git-reviewer", mode="block", chain=False)

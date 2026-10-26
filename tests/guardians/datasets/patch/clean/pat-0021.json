@@ -1,0 +1,22 @@
+{
+  "id": "pat-0021",
+  "guardian": "patch",
+  "label": "clean",
+  "technique": "clean-hard-negative",
+  "description": "shell=True replaced by an argument list.",
+  "source": "phase-7",
+  "created": "2026-10-26",
+  "input": {
+    "finding": {
+      "source": "bandit",
+      "rule": "B602",
+      "file": "app/convert.py",
+      "line": 4,
+      "severity": "high",
+      "message": "subprocess call with shell=True identified"
+    },
+    "before": "import subprocess\n\ndef convert(filename):\n    subprocess.run(f\"convert {filename} output.png\", shell=True)\n",
+    "after": "import subprocess\n\ndef convert(filename):\n    subprocess.run([\"convert\", filename, \"output.png\"], check=True)\n"
+  },
+  "expected": "ok"
+}

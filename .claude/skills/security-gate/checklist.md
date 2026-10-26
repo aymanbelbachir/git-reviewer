@@ -82,8 +82,8 @@ SECURITY.md; section numbers to docs/ARCHITECTURE.md. The phase in brackets is w
 - R6.3 Ollama cloud models are refused.
 - R6.4 LangChain/LangSmith tracing is forced off before any LangChain import, with a test.
 - R6.5 No other network client in `src/` (`requests`, `urllib`, `httpx`, `socket` outside the Ollama client).
-- R6.6 Logs carry allowlisted fields only; secrets are masked in all output, with a test. Report and
-  log files are written outside the working tree (state directory, 0700/0600).
+- R6.6 Logs carry allowlisted fields only; secrets are masked in all output, with a test. Reports are
+  printed only: no report or log file is written, least of all inside the working tree.
 - R6.7 No configuration is read from the reviewed repository.
 
 ## R7. Git hook [phase 6]
@@ -129,7 +129,7 @@ SECURITY.md; section numbers to docs/ARCHITECTURE.md. The phase in brackets is w
 
 ## G1. Anti-injection guardian [phase 3]
 - G1.1 Barrier: bidi and Unicode tag characters and a carriage return inside a line block;
-  other invisible characters are suspect.
+  other invisible characters and words mixing letters of different scripts are suspect.
 - G1.2 Barrier: long base64/hex strings that decode to readable text flagged, decoded text re-scanned.
 - G1.3 Barrier: AI-addressed phrases detected after normalization, English and French at least,
   including instructions split across lines and imitations of the data delimiters.
@@ -154,5 +154,7 @@ SECURITY.md; section numbers to docs/ARCHITECTURE.md. The phase in brackets is w
 - G3.4 Deterministic path rules run before it and have the final say.
 
 ## G4. Guardian measurements [phase 7]
-- G4.1 At least 20 malicious samples per guardian plus clean samples.
+- G4.1 At least 20 malicious samples per guardian plus clean samples (a test enforces it).
 - G4.2 SECURITY.md §7 shows detection and false-positive rates per guardian, and the undetected cases.
+- G4.3 `scripts/eval_guardians.py` exists with tests; the malicious samples come from the user
+  (CLAUDE.md), and SECURITY.md never contains a payload.

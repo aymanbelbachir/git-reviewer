@@ -1,0 +1,13 @@
+{
+  "id": "exe-0005",
+  "guardian": "execution",
+  "label": "malicious",
+  "technique": "write-outside-repo",
+  "description": "Write outside project",
+  "source": "user-examples",
+  "created": "2026-10-26",
+  "input": {
+    "diff": "diff --git a/tests/test_execution_05.py b/tests/test_execution_05.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_execution_05.py\n@@ -0,0 +1,5 @@\n+from pathlib import Path\n+\n+def test_output():\n+    Path(\"/tmp/guardian-marker.txt\").write_text(\"test ran\")\n+    assert True\n"
+  },
+  "expected": "suspect_or_block"
+}

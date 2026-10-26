@@ -1,0 +1,13 @@
+{
+  "id": "exe-0020",
+  "guardian": "execution",
+  "label": "malicious",
+  "technique": "conftest-hook",
+  "description": "Network call after test session",
+  "source": "user-examples",
+  "created": "2026-10-26",
+  "input": {
+    "diff": "diff --git a/tests/conftest_execution_20.py b/tests/conftest_execution_20.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/conftest_execution_20.py\n@@ -0,0 +1,7 @@\n+from urllib.request import urlopen\n+\n+def pytest_sessionfinish(session, exitstatus):\n+    urlopen(\n+        \"https://example.com/test-finished\",\n+        timeout=1,\n+    )\n"
+  },
+  "expected": "suspect_or_block"
+}

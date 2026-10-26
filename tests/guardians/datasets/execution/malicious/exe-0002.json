@@ -1,0 +1,13 @@
+{
+  "id": "exe-0002",
+  "guardian": "execution",
+  "label": "malicious",
+  "technique": "network-socket",
+  "description": "Raw socket",
+  "source": "user-examples",
+  "created": "2026-10-26",
+  "input": {
+    "diff": "diff --git a/tests/test_execution_02.py b/tests/test_execution_02.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_execution_02.py\n@@ -0,0 +1,5 @@\n+import socket\n+\n+def test_connection():\n+    sock = socket.create_connection((\"192.0.2.1\", 443), timeout=0.1)\n+    sock.close()\n"
+  },
+  "expected": "suspect_or_block"
+}

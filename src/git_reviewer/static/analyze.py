@@ -88,7 +88,7 @@ def run_static_analysis(repo: Path, diff: Diff, *, hook: bool = False) -> Static
         for f in scanned
     ]
     desync = [f for f in scanned if f.line > line_counts.get(f.file, 0)]
-    on_added = [f for f in scanned if diff.is_added_line(f.file, f.line)]
+    on_added = [kept for f in scanned if (kept := _on_change(diff, f)) is not None]
     own = suppression_findings(diff)
     ordered = sorted([*on_added, *own], key=lambda f: (f.file, f.line, f.tool, f.rule))
     return StaticResult(
@@ -103,6 +103,18 @@ def run_static_analysis(repo: Path, diff: Diff, *, hook: bool = False) -> Static
             ("gitleaks", exported),
         ),
     )
+
+
+def _on_change(diff: Diff, finding: StaticFinding) -> StaticFinding | None:
+    """The finding if its statement touches an added line, anchored on the first such line:
+    scanners report a multi-line call or string on one of its lines (bandit's B608 on the first
+    line of a query whose `% value` was added below it), which may be unchanged."""
+    if diff.is_added_line(finding.file, finding.line):
+        return finding
+    if finding.span is None:
+        return None
+    added = diff.first_added_line(finding.file, *finding.span)
+    return None if added is None else finding.model_copy(update={"line": added})
 
 
 def suppression_findings(diff: Diff) -> list[StaticFinding]:

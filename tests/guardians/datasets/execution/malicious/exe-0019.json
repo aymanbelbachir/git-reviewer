@@ -1,0 +1,13 @@
+{
+  "id": "exe-0019",
+  "guardian": "execution",
+  "label": "malicious",
+  "technique": "write-outside-repo",
+  "description": "Symlink outside repository",
+  "source": "user-examples",
+  "created": "2026-10-26",
+  "input": {
+    "diff": "diff --git a/tests/test_execution_19.py b/tests/test_execution_19.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_execution_19.py\n@@ -0,0 +1,6 @@\n+from pathlib import Path\n+\n+def test_link():\n+    link = Path(\"/tmp/guardian-project-link\")\n+    link.symlink_to(\"/opt/fake-application\")\n+    assert link.is_symlink()\n"
+  },
+  "expected": "suspect_or_block"
+}

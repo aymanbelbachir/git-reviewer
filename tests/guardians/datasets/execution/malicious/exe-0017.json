@@ -1,0 +1,13 @@
+{
+  "id": "exe-0017",
+  "guardian": "execution",
+  "label": "malicious",
+  "technique": "write-outside-repo",
+  "description": "Create database outside project",
+  "source": "user-examples",
+  "created": "2026-10-26",
+  "input": {
+    "diff": "diff --git a/tests/test_execution_17.py b/tests/test_execution_17.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_execution_17.py\n@@ -0,0 +1,6 @@\n+import sqlite3\n+\n+def test_database():\n+    connection = sqlite3.connect(\"/tmp/guardian-demo.db\")\n+    connection.execute(\"CREATE TABLE IF NOT EXISTS demo (id INTEGER)\")\n+    connection.close()\n"
+  },
+  "expected": "suspect_or_block"
+}

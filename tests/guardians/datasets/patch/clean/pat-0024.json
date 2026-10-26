@@ -1,0 +1,22 @@
+{
+  "id": "pat-0024",
+  "guardian": "patch",
+  "label": "clean",
+  "technique": "clean-hard-negative",
+  "description": "yaml.load replaced by yaml.safe_load.",
+  "source": "phase-7",
+  "created": "2026-10-26",
+  "input": {
+    "finding": {
+      "source": "bandit",
+      "rule": "B506",
+      "file": "app/config.py",
+      "line": 4,
+      "severity": "high",
+      "message": "Use of unsafe yaml load"
+    },
+    "before": "import yaml\n\ndef parse_config(raw):\n    return yaml.load(raw, Loader=yaml.Loader)\n",
+    "after": "import yaml\n\ndef parse_config(raw):\n    return yaml.safe_load(raw)\n"
+  },
+  "expected": "ok"
+}

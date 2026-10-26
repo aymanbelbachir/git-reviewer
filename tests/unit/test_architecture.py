@@ -15,7 +15,6 @@ EFFECT_MODULES = {
     "sandbox/docker.py",
     "patch/apply.py",
     "hook/install.py",
-    "report/write.py",
 }
 FORBIDDEN_CALLS = {
     ("os", "system"),

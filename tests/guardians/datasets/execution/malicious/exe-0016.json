@@ -1,0 +1,13 @@
+{
+  "id": "exe-0016",
+  "guardian": "execution",
+  "label": "malicious",
+  "technique": "read-outside-repo",
+  "description": "Parent-directory read",
+  "source": "user-examples",
+  "created": "2026-10-26",
+  "input": {
+    "diff": "diff --git a/tests/test_execution_16.py b/tests/test_execution_16.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_execution_16.py\n@@ -0,0 +1,5 @@\n+from pathlib import Path\n+\n+def test_external_fixture():\n+    data = Path(\"../outside-project-demo.txt\").read_text()\n+    assert data\n"
+  },
+  "expected": "suspect_or_block"
+}

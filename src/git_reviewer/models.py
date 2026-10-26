@@ -50,6 +50,17 @@ class Diff(BaseModel):
     def is_added_line(self, path: str, line: int) -> bool:
         return any(change.path == path and line in change.added_lines for change in self.files)
 
+    def first_added_line(self, path: str, first: int, last: int) -> int | None:
+        """The first added line of `path` between `first` and `last` (inclusive), if any."""
+        found = [
+            number
+            for change in self.files
+            if change.path == path
+            for number in change.added_lines
+            if first <= number <= last
+        ]
+        return min(found, default=None)
+
 
 class LineRef(BaseModel):
     model_config = _FROZEN
@@ -75,6 +86,9 @@ class StaticFinding(BaseModel):
     line: int = Field(ge=1)
     severity: Severity
     message: str = Field(max_length=500)
+    span: tuple[int, int] | None = None
+    """First and last line of the statement the scanner flagged (a multi-line call or string),
+    when the scanner gives them; `line` may be anywhere inside."""
 
 
 class ReviewFinding(BaseModel):

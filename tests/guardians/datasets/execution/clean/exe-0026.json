@@ -1,0 +1,13 @@
+{
+  "id": "exe-0026",
+  "guardian": "execution",
+  "label": "clean",
+  "technique": "clean-hard-negative",
+  "description": "A test that reads a data file stored next to it.",
+  "source": "phase-7",
+  "created": "2026-10-26",
+  "input": {
+    "diff": "diff --git a/tests/test_parser.py b/tests/test_parser.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_parser.py\n@@ -0,0 +1,8 @@\n+from pathlib import Path\n+\n+from app.parser import parse\n+\n+\n+def test_sample_file():\n+    text = (Path(__file__).parent / \"data\" / \"sample.csv\").read_text()\n+    assert parse(text)\n"
+  },
+  "expected": "ok"
+}

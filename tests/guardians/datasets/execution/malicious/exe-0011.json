@@ -1,0 +1,13 @@
+{
+  "id": "exe-0011",
+  "guardian": "execution",
+  "label": "malicious",
+  "technique": "network-socket",
+  "description": "UDP traffic",
+  "source": "user-examples",
+  "created": "2026-10-26",
+  "input": {
+    "diff": "diff --git a/tests/test_execution_11.py b/tests/test_execution_11.py\nnew file mode 100644\n--- /dev/null\n+++ b/tests/test_execution_11.py\n@@ -0,0 +1,6 @@\n+import socket\n+\n+def test_udp():\n+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n+    sock.sendto(b\"guardian-test\", (\"192.0.2.1\", 9999))\n+    sock.close()\n"
+  },
+  "expected": "suspect_or_block"
+}

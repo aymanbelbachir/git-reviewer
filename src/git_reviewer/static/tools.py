@@ -64,8 +64,10 @@ def run_ruff(snapshot: Snapshot, files: Sequence[str], repo: Path) -> list[Stati
         if path is None or line is None:
             raise StaticAnalysisError(_UNMAPPED.format(tool="ruff"))
         rule = code if isinstance(code, str) else "syntax-error"
+        end = _int((item.get("end_location") or {}).get("row"))
+        span = (line, end) if end is not None else None
         findings.append(
-            _finding("ruff", rule, path, line, _ruff_severity(code), item.get("message"))
+            _finding("ruff", rule, path, line, _ruff_severity(code), item.get("message"), span)
         )
     return findings
 
@@ -110,8 +112,15 @@ def run_bandit(
         message = item.get("issue_text")
         if rule in _BANDIT_QUOTES_SECRET:
             message = "possible hardcoded password; value masked"
+        line_range = item.get("line_range")
+        numbers = [_int(n) for n in line_range] if isinstance(line_range, list) else []
+        numbers = [n for n in numbers if n is not None]
+        # The B1xx checks (constants, default arguments, try/except) report the whole enclosing
+        # dict, call, function or try block as their range: a change anywhere in it would bring
+        # back an old finding. Their reported line alone counts.
+        span = (min(numbers), max(numbers)) if numbers and not rule.startswith("B1") else None
         # `code` holds source lines and is deliberately dropped.
-        findings.append(_finding("bandit", rule, path, line, severity, message))
+        findings.append(_finding("bandit", rule, path, line, severity, message, span))
     skipped = []
     for error in report["errors"]:
         path = _relative(error.get("filename"), snapshot)
@@ -162,7 +171,9 @@ def run_gitleaks(snapshot: Snapshot, repo: Path) -> tuple[list[StaticFinding], l
             secrets.append(secret)
         rule = str(item.get("RuleID", "secret"))
         message = f"possible secret ({rule}); value masked"
-        findings.append(_finding("gitleaks", rule, path, line, "critical", message))
+        end = _int(item.get("EndLine"))
+        span = (line, end) if end is not None else None
+        findings.append(_finding("gitleaks", rule, path, line, "critical", message, span))
     return findings, secrets
 
 
@@ -216,7 +227,13 @@ def _ruff_severity(code: Any) -> Severity:
 
 
 def _finding(
-    tool: str, rule: str, path: str, line: int, severity: Severity, message: Any
+    tool: str,
+    rule: str,
+    path: str,
+    line: int,
+    severity: Severity,
+    message: Any,
+    span: tuple[int, int] | None = None,
 ) -> StaticFinding:
     text = str(message or "").strip()[:_MAX_MESSAGE]
     return StaticFinding.model_validate(
@@ -227,5 +244,7 @@ def _finding(
             "line": line,
             "severity": severity,
             "message": text,
+            # A span that does not contain the reported line is ignored: the line alone counts.
+            "span": span if span is not None and 1 <= span[0] <= line <= span[1] else None,
         }
     )

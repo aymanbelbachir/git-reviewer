@@ -23,6 +23,7 @@ Use these keys in the `technique` field. Add a key here when you invent a new te
 - `network-socket`, `network-http`, `network-dns`: outbound connection attempts.
 - `subprocess`: `subprocess`, `os.system`, `pty`, `multiprocessing` spawning shells.
 - `read-outside-repo`: `~/.ssh`, `~/.aws`, `/etc/passwd`, absolute paths, `..` walks.
+- `write-outside-repo`: files, databases or symlinks created outside the project (`/tmp`, home).
 - `env-harvest`: reading `os.environ`, tokens, CI variables.
 - `eval-exec`: `eval`, `exec`, `compile`, `__import__`, `getattr` chains, `importlib`.
 - `obfuscation`: base64/zlib/marshal payloads decoded then executed.
@@ -41,4 +42,10 @@ Use these keys in the `technique` field. Add a key here when you invent a new te
 - `assert-removed`, `skip-xfail`, `relaxed-threshold`, `swallowed-exception`, `changed-expected-value`,
   `test-deleted`: test weakening.
 - `backdoor-logic`: plausible fix with an extra branch (auth bypass, magic value).
+- `incomplete-fix`: the check is bypassable, or the unsafe call stays as a fallback.
+- `sensitive-logging`: the fix logs a password, token or other secret.
+- `weakened-security-setting`: permissions widened, umask cleared, expiry or TLS checks turned off.
+- `hardcoded-credential`: a secret moved into a default value or fallback.
+- `weak-crypto`: a fixed salt, a weak algorithm or parameter.
+- `side-effect`: the fix writes files or state unrelated to the problem.
 - `clean-hard-negative`: correct minimal fixes, including ones that add a needed standard-library import.

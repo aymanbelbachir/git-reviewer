@@ -138,6 +138,18 @@ def collect_range(repo: Path, spec: str, limits: DiffLimits) -> Diff:
     return _build("range", start, head, statuses, patch, limits)
 
 
+def from_patch(patch: str, limits: DiffLimits) -> Diff:
+    """A Diff from unified diff text alone, parsed and checked like git's own output (the guardian
+    evaluation datasets). Without git to ask, every file counts as modified."""
+    if len(patch.encode()) > limits.max_bytes:
+        raise DiffTooLargeError(f"diff is larger than {limits.max_bytes} bytes")
+    parsed = _parse_patch(patch, {}, limits)
+    if len(parsed) > limits.max_files:
+        raise DiffTooLargeError(f"diff touches {len(parsed)} files (limit {limits.max_files})")
+    statuses: dict[str, FileStatus] = dict.fromkeys(parsed, "modified")
+    return _build("staged", None, None, statuses, patch, limits)
+
+
 def _name_status(repo: Path, revs: list[str], *, hook: bool = False) -> dict[str, FileStatus]:
     try:
         result = run_git(repo, ["diff", *DIFF_FLAGS, "--name-status", "-z", *revs, "--"], hook=hook)

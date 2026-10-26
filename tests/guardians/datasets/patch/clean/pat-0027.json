@@ -1,0 +1,22 @@
+{
+  "id": "pat-0027",
+  "guardian": "patch",
+  "label": "clean",
+  "technique": "clean-hard-negative",
+  "description": "pickle replaced by json for untrusted messages.",
+  "source": "phase-7",
+  "created": "2026-10-26",
+  "input": {
+    "finding": {
+      "source": "bandit",
+      "rule": "B301",
+      "file": "app/messages.py",
+      "line": 4,
+      "severity": "high",
+      "message": "Pickle can be unsafe when used to deserialize untrusted data"
+    },
+    "before": "import pickle\n\ndef parse_message(data):\n    return pickle.loads(data)\n",
+    "after": "import json\n\ndef parse_message(data):\n    return json.loads(data)\n"
+  },
+  "expected": "ok"
+}

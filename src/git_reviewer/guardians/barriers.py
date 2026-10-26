@@ -9,6 +9,8 @@ Scans every line shown to the model (added, unchanged and removed) and every fil
 - phrases addressed to an AI, after NFKC normalization, casefolding and removal of invisible
   characters, also across three consecutive lines (split instructions) -> suspect;
 - text imitating our own data delimiters -> suspect;
+- a word mixing letters of different scripts (homoglyphs: a Cyrillic or Armenian "o" in an English
+  word), which no phrase pattern would match -> suspect;
 - a carriage return inside a line (Python sees a line break git does not) -> block.
 """
 
@@ -78,6 +80,9 @@ _PHRASES = [
 ]
 _DELIMITER = re.compile(r"untrusted_[a-z]+|nonce=", re.IGNORECASE)
 _SPACES = re.compile(r"\s+")
+_WORD = re.compile(r"[^\W\d_]+")
+# Scripts that are written together within one word: Japanese mixes kanji and kana.
+_SCRIPT_GROUPS = {"CJK": "EAST_ASIAN", "HIRAGANA": "EAST_ASIAN", "KATAKANA": "EAST_ASIAN"}
 
 
 @dataclass
@@ -142,6 +147,9 @@ def _scan_text(result: BarrierResult, line: PatchLine, text: str, *, where: str)
         result.flag(line, "suspect", f"text addressed to an AI in a {where}")
     if _DELIMITER.search(text):
         result.flag(line, "suspect", f"text imitating the review's data delimiters in a {where}")
+    if _mixes_lookalike_scripts(text):
+        reason = f"word mixing letters of different scripts (look-alikes) in a {where}"
+        result.flag(line, "suspect", reason)
     for decoded in _decoded_runs(text):
         reason = "encoded text that addresses an AI" if addresses_an_ai(decoded) else "encoded text"
         result.flag(line, "suspect", f"{reason} in a {where}")
@@ -158,6 +166,26 @@ def _scan_split_phrases(result: BarrierResult, lines: list[PatchLine]) -> None:
         if addresses_an_ai(" ".join(line.text for line in window)):
             for line in window:
                 result.flag(line, "suspect", "text addressed to an AI, split across lines")
+
+
+def _mixes_lookalike_scripts(text: str) -> bool:
+    """A word whose letters come from more than one script: "ignore" spelled with a Cyrillic or
+    Armenian "o" reads as English but matches no pattern, and so do Cyrillic and Greek letters
+    combined without any Latin one. Checked after NFKC, so fullwidth and mathematical letters
+    count as the Latin letters they show. Words in one script are not flagged."""
+    for word in _WORD.findall(unicodedata.normalize("NFKC", text)):
+        if word.isascii():
+            continue
+        scripts = {_script(char) for char in word}
+        if len(scripts) > 1:
+            return True
+    return False
+
+
+def _script(char: str) -> str:
+    """The script of a letter, from the first word of its Unicode name (LATIN, CYRILLIC...)."""
+    first = unicodedata.name(char, "UNKNOWN").split(" ", 1)[0]
+    return _SCRIPT_GROUPS.get(first, first)
 
 
 def _decoded_runs(text: str) -> list[str]:

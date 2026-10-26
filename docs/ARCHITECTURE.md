@@ -1,7 +1,7 @@
 # git-reviewer: architecture plan
 
-Status: phases 2 to 6 are implemented as described here; what is left for phase 7 (full security
-suite, guardian datasets, final audit) is still the plan. Every design decision below states its security rationale; threat IDs
+Status: phases 2 to 7 are implemented as described here. The guardians' measured detection and
+false-positive rates are in SECURITY.md §7. Every design decision below states its security rationale; threat IDs
 (`T-xx`) refer to [SECURITY.md](../SECURITY.md).
 
 ## 1. Scope
@@ -38,10 +38,10 @@ Rules that follow from the boundary:
 
 1. Untrusted data flows *through* the graph but never chooses an effect. Only deterministic
    code decides what to run, what to write and whether to block.
-2. Effects live in exactly six modules: `proc` (subprocess), `git.snapshot` (exports the reviewed
+2. Effects live in exactly five modules: `proc` (subprocess), `git.snapshot` (exports the reviewed
    files, or the whole reviewed tree, from git objects into a private temp dir for the scanners
-   and the sandbox), `sandbox.docker`, `patch.apply`, `hook.install` (writes the pre-commit hook) and
-   `report.write` (report and log files).
+   and the sandbox), `sandbox.docker`, `patch.apply` and `hook.install` (writes the pre-commit
+   hook). Reports only go to standard output (§12).
    Nothing else may spawn a process or write outside a private temp dir. A unit test enforces this
    by scanning every other module for `subprocess`, `os.system`, `shutil.rmtree`, `open(..., "w"/"a"/"x")`,
    `Path.write_*`, `os.replace`, `os.rename`, `os.chmod` and `os.symlink`.
@@ -88,8 +88,8 @@ src/git_reviewer/
   graph/
     state.py nodes.py build.py
   report/
-    render.py          # text / json / markdown renderers over sanitized data
-    write.py           # the only writer of report and log files, outside the working tree
+    model.py           # the Report, exit codes
+    render.py          # text / json renderers over sanitized data (printed, never saved)
   hook/
     install.py         # renders the hook script; install / chain / refuse / uninstall
 sandbox/Dockerfile     # sandbox image: base pinned by digest, tools installed with hashes
@@ -274,7 +274,13 @@ Design rules:
   findings".
 - Git paths are always literal (`--literal-pathspecs`): a file named `:(exclude)payload.py` would
   otherwise be pathspec magic that removes `payload.py` from the list of files to scan.
-- Only findings on added lines are kept. git-reviewer adds its own findings for added suppression
+- Only findings on added lines are kept: a finding counts when any line of the statement it flags
+  (the scanner's line range: bandit's `line_range`, ruff's `end_location`, gitleaks' `EndLine`) was
+  added, and is then anchored on the first such line. bandit's B1xx checks (constants, default
+  arguments, try/except) give the whole enclosing dict, function or block as their range, so for
+  them the reported line alone counts. Scanners report a multi-line call or string
+  on one of its lines, which may be unchanged (bandit's SQL check on the first line of a query
+  whose `% value` was added below it). git-reviewer adds its own findings for added suppression
   markers (`# noqa`, `# nosec`, `gitleaks:allow`) and for edits to scanner configuration.
 - Secret values never appear in findings: gitleaks messages name the rule only, bandit's
   hardcoded-password messages (which quote the value) are replaced, and every message is masked
@@ -458,8 +464,11 @@ Before the review:
   - a carriage return inside a line (not the CR of a CRLF ending) → **block**: git splits lines on
     LF only, but Python also ends a line at a lone CR, so code can hide in what git, the scanners'
     line mapping and the model see as a comment.
-  - Not implemented yet: mixed-script identifier (homoglyph) detection; NFKC only folds
-    compatibility forms such as fullwidth letters (T-07 residual).
+  - a word whose letters come from more than one script, after NFKC (homoglyphs: "ignore" with a
+    Cyrillic or Armenian "o", fullwidth or mathematical letters mixed with Cyrillic, Cyrillic with
+    Greek) → **suspect**, since no phrase pattern would match it. Kanji and kana count as one
+    script. A word written entirely in look-alike letters of one script is not detected (T-07
+    residual).
 - Agent: called only when the barrier says "suspect" (a block is already final). It receives the
   flagged lines with one neighbour on each side, nonce-delimited, and may raise to "block". Line
   references it returns that it was not shown are dropped.
@@ -483,8 +492,9 @@ Before the sandbox runs:
 - Agent: reads the added and context lines of the changed test infrastructure: test files
   (`test_*.py`, `*_test.py`, anything under `tests/`, `test/`, `testing/`, `fixtures/`),
   `conftest.py`, `setup.py`, `setup.cfg`, `pyproject.toml`, `pytest.ini`, `pytest.toml`,
-  `.pytest.toml`, `.pytest.ini`, `tox.ini`, `noxfile.py`, `*.pth`, `sitecustomize.py` and
-  `usercustomize.py`. It flags network access, subprocesses, reads
+  `.pytest.toml`, `.pytest.ini`, `tox.ini`, `noxfile.py`, `*.pth`, `sitecustomize.py`,
+  `usercustomize.py`, and `test*.txt` (pytest's default `--doctest-glob` runs their `>>>` lines).
+  It flags network access, subprocesses, reads
   outside the repo, environment harvesting, `eval`/`exec`/`compile`, `__import__`/`getattr` chains,
   encoded payloads and tampering with the test run. Lines are sent in batches that fit its context
   (like the anti-injection agent); more than 5 batches, or a failure, is a block. A block means the
@@ -579,18 +589,18 @@ After the sandbox runs (also when a run failed):
    `reset` and `stash` in the code).
 
 ## 12. Reports and logs
-- `Report` (Pydantic) → renderers: text (default), JSON, and an optional Markdown file. Files are
-  written by `report.write` **outside the working tree**, in
-  `$XDG_STATE_HOME/git-reviewer/reports/<repo hash>/` (directory 0700, files 0600): inside the user's
-  repo they would be untracked, easy to commit with `git add -A`, and would change the execution
-  guardian's fingerprint. A "Security report" section lists every barrier and guardian decision.
+- `Report` (Pydantic) → renderers: text (default) and JSON (`--format json`), printed on standard
+  output only. git-reviewer writes no report file: one inside the repository would be untracked,
+  easy to commit with `git add -A`, and would change the execution guardian's fingerprint. Saving a
+  report is the user's choice (a shell redirection, outside the repository). A "Security report"
+  section lists every barrier and guardian decision.
 - Secrets: gitleaks findings are captured in memory only. Their values are used to mask any text
-  before display (LLM explanations, guardian reasons, test output), then dropped. Displayed secrets
-  show the rule, the location and a short hash prefix only.
-- Logs: stderr, level WARNING by default, optional file (same state directory, mode 0600, written by
-  `report.write`). Log events carry allowlisted
-  fields only (event, counts, durations, verdicts, rule ids, file paths); free text from untrusted
-  sources is never logged (T-26).
+  before display (LLM explanations, guardian reasons, test output), then dropped. A secret finding
+  shows its rule and location, never the value.
+- Logs: the `git_reviewer.audit` logger (`audit_log.event`) records guardian decisions with
+  allowlisted fields only (event, source, verdict, counts, durations, rule ids, as numbers or short
+  identifiers); free text from untrusted sources is never logged (T-26). It is silent unless the
+  user's own Python logging configuration enables it.
 
 ## 13. Git hook
 `git-reviewer install-hook [--mode block|warn] [--chain]` writes this script, rendered at install
@@ -634,11 +644,14 @@ exec '/absolute/path/to/git-reviewer' review --hook --mode block
 - Writing: a new file (`O_EXCL | O_NOFOLLOW`, mode 0755 less the umask; refused if the umask
   would leave it unreadable or not executable for its owner) is hard-linked into place, which fails
   if the name appeared meanwhile; only git-reviewer's own hook is ever replaced (by rename).
-- The binary must be an absolute path to an executable outside the repository, both as given and
-  resolved: a file or a symlink in the repository is content the branch under review controls.
-  "Outside" is decided by file identity (device and inode of every parent), not by name, since
-  macOS file systems ignore case and Unicode normalization. Like the binaries `proc` runs, it and
-  its directory must not be writable by group or others. A quote, newline or NUL in the binary or
+- The binary must be an absolute path to an executable outside the repository and every one of
+  its worktrees (the hook serves them all), at every hop of a chain of symbolic links (the path
+  given, each link, the resolved program): a file or a symlink there is content a checked-out
+  branch controls. A worktree git lists but that is missing is refused, with a hint to run
+  `git worktree repair` or `prune`: it may have been moved by hand and still be in use. "Outside" is decided by file identity (device and inode of
+  every parent), not by name, since macOS file systems ignore case and Unicode normalization. Like
+  the binaries `proc` runs, neither the program nor its directory may be writable by group or
+  others, nor the directory holding the path given (e.g. `~/.local/bin` with a symlink). A quote, newline or NUL in the binary or
   hooks path is refused (the script single-quotes them).
 - Modes. `block`: findings at or above the threshold exit 1 and stop the commit. `warn`: findings
   and resource-limit "not reviewed" results never stop the commit; security blocks (exit 2) and an
@@ -674,10 +687,18 @@ exec '/absolute/path/to/git-reviewer' review --hook --mode block
   and `verify` reports skipped security tests as a failure, never as green.
 - An autouse fixture blocks any socket connection that is not to loopback.
 - Guardian datasets: one JSON file per sample:
-  `{id, guardian, label: malicious|clean, technique, description, input: {...}, expected}`.
-  `scripts/eval_guardians.py` computes, per guardian, detection rate on malicious samples and
-  false-positive rate on clean ones, and lists the misses. The `red-team` skill writes these into
-  `SECURITY.md` between markers.
+  `{id, guardian, label: malicious|clean, technique, description, source, created, input, expected}`,
+  with `input` = `{diff}` for the anti-injection and execution guardians and `{finding, before,
+  after}` for the patch auditor (the diff is built from them as the fix loop builds it).
+  `scripts/eval_guardians.py` validates every sample (a diff that parses with every added line in
+  a hunk, test infrastructure for the execution guardian, a patch that changes valid Python, the
+  right directory, unique ids), refuses a run with a guardian failure or without both kinds of
+  samples, runs each guardian as a review does, and computes per guardian the detection rate
+  on malicious samples, the false-positive rate on clean ones, what the deterministic layer catches
+  alone and, for patches, the whole pipeline; it lists the misses. The `red-team` skill writes
+  these into `SECURITY.md` between markers. The malicious samples are the user's examples
+  (CLAUDE.md); the clean ones are legitimate code that looks unusual.
+- `tests/security/README.md` maps each attack the spec requires to the test that proves it fails.
 
 ## 16. Phase map
 
@@ -688,4 +709,4 @@ exec '/absolute/path/to/git-reviewer' review --hook --mode block
 | 4 | `git/snapshot.py` tree export, `sandbox/*`, `sandbox/Dockerfile`, execution guardian |
 | 5 | `patch/*` (author, edits, policy, checks, apply), `guardians/patch_auditor.py`, `graph/fix.py` |
 | 6 | `hook/install.py`, `install-hook` / `uninstall-hook`, the hook line in `doctor` |
-| 7 | full security suite, guardian datasets ≥ 20 per guardian, `/red-team`, `/security-gate`, final audit |
+| 7 | deferred gaps closed (scanner line ranges, doctest files, hook binary in another worktree), homoglyph detection, guardian instructions extended, `scripts/eval_guardians.py`, security suite index, final audit; guardian datasets (60 malicious from the user's examples, 21 clean) and the first measured rates |

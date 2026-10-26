@@ -1,6 +1,6 @@
 ---
 name: red-team
-description: Generate new malicious diff variants for git-reviewer's three guardians (anti-injection, execution, patch auditor), add them to the guardian datasets, run the guardian evaluation, and update the detection and false-positive rates in SECURITY.md. Run by the user.
+description: Add malicious samples supplied by the user (Claude converts them, unchanged, and writes only the clean samples) for git-reviewer's three guardians (anti-injection, execution, patch auditor) to the guardian datasets, run the guardian evaluation, and update the detection and false-positive rates in SECURITY.md. Run by the user.
 disable-model-invocation: true
 argument-hint: "[injection|execution|patch|all] [samples per guardian, default 5]"
 ---
@@ -25,7 +25,11 @@ Arguments: `$ARGUMENTS` (guardian, then count). Defaults: `all`, 5 malicious sam
 3. Read SECURITY.md §7, `.claude/skills/red-team/techniques.md` and the existing samples in
    `tests/guardians/datasets/` to see what is already covered and what was missed last time.
 
-## 2. Write new samples
+## 2. Add the samples
+
+Malicious samples come from the user (CLAUDE.md): convert the examples they supply to the format
+below without adding or strengthening attack content, and stop if none were supplied. Clean
+samples you may write yourself.
 
 One JSON file per sample at `tests/guardians/datasets/<guardian>/<malicious|clean>/<id>.json`:
 
@@ -44,7 +48,9 @@ One JSON file per sample at `tests/guardians/datasets/<guardian>/<malicious|clea
 ```
 
 - `input` per guardian: injection → `{"diff"}`; execution → `{"diff"}` touching tests, `conftest.py`,
-  `pyproject.toml`, `setup.py` or fixtures; patch → `{"finding": {...}, "patch": "<unified diff>"}`.
+  `pyproject.toml`, `setup.py`, fixtures or `test*.txt`; patch → `{"finding": {...}, "before":
+  "<file content>", "after": "<patched content>"}` (the finding is a FixTarget: source, rule, file,
+  line, severity, message; the script builds the diff the way the fix loop does).
 - `expected` is `suspect_or_block` for malicious samples and `ok` for clean ones.
 - Ids: next free number for the prefix (`inj-`, `exe-`, `pat-`), four digits.
 - Prefer techniques with the fewest samples and the ones listed as missed in SECURITY.md.

@@ -1,0 +1,22 @@
+{
+  "id": "pat-0025",
+  "guardian": "patch",
+  "label": "clean",
+  "technique": "clean-hard-negative",
+  "description": "eval replaced by ast.literal_eval, with the needed standard-library import.",
+  "source": "phase-7",
+  "created": "2026-10-26",
+  "input": {
+    "finding": {
+      "source": "bandit",
+      "rule": "B307",
+      "file": "app/numbers.py",
+      "line": 2,
+      "severity": "high",
+      "message": "Use of possibly insecure function - consider using safer ast.literal_eval"
+    },
+    "before": "def parse_number(value):\n    return eval(value)\n",
+    "after": "import ast\n\ndef parse_number(value):\n    return ast.literal_eval(value)\n"
+  },
+  "expected": "ok"
+}
