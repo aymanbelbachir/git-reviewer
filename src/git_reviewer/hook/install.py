@@ -393,16 +393,27 @@ def _check_binary(repo: Path, binary: Path) -> None:
 
 
 def _link_chain(binary: Path) -> list[Path]:
-    """The path given, every symbolic link it goes through, and the resolved program."""
+    """The path given, where every symbolic link on the way physically lives, and the resolved
+    program. "Physically": a link reached through a folder that is itself a symlink (~/bin to a
+    folder of a repository) lives in that repository, whatever the path says."""
     hops = [binary]
-    current = binary
+    current = _physical(binary)
     for _ in range(_MAX_LINK_HOPS):
+        hops.append(current)
         if not current.is_symlink():
             return [*hops, binary.resolve()]
         target = current.readlink()
-        current = target if target.is_absolute() else current.parent / target
-        hops.append(current)
+        # The system reads a relative target from the link's real folder: so does this.
+        current = _physical(target if target.is_absolute() else current.parent / target)
     raise HookError(f"{binary} goes through too many symbolic links")
+
+
+def _physical(path: Path) -> Path:
+    """`path` with its folder resolved, but not the last component (which may be a link)."""
+    try:
+        return path.parent.resolve(strict=True) / path.name
+    except OSError as exc:
+        raise HookError(f"cannot resolve the folder of {path}: {exc.strerror}") from exc
 
 
 def _worktrees(repo: Path) -> list[Path]:

@@ -646,3 +646,37 @@ def test_a_symlink_chain_through_the_repository_is_refused(
     (outer / "git-reviewer").symlink_to(repo / "tool-link")
     with pytest.raises(HookError, match="through a symbolic link"):
         install(repo, outer / "git-reviewer", mode="block", chain=False)
+
+
+def test_a_link_reached_through_a_folder_symlink_into_the_repository_is_refused(
+    make_repo: Callable[..., Path], binary: Path, tmp_path: Path
+) -> None:
+    # ~/bin -> <repo>/bin (a dotfiles setup), and <repo>/bin/git-reviewer -> the real program:
+    # the path given and the program are both outside, but the link lives in the repository.
+    repo = make_repo()
+    (repo / "bin").mkdir()
+    (repo / "bin" / "git-reviewer").symlink_to(binary)
+    user_bin = tmp_path / "user-bin"
+    user_bin.symlink_to(repo / "bin")
+    with pytest.raises(HookError, match="through a symbolic link"):
+        install(repo, user_bin / "git-reviewer", mode="block", chain=False)
+    assert not (hooks_of(repo) / "pre-commit").exists()
+
+
+def test_a_relative_link_is_followed_from_its_real_folder(
+    make_repo: Callable[..., Path], binary: Path, tmp_path: Path
+) -> None:
+    # The system reads "../real/git-reviewer" from the link's real folder (outside here):
+    # the chain must end at the same program, which is allowed.
+    repo = make_repo()
+    tools = tmp_path / "tools"
+    (tools / "links").mkdir(parents=True)
+    (tools / "real").mkdir()
+    real = tools / "real" / "git-reviewer"
+    real.write_text("#!/bin/sh\n", encoding="utf-8")
+    real.chmod(0o755)
+    (tools / "links" / "git-reviewer").symlink_to(Path("..") / "real" / "git-reviewer")
+    alias = tmp_path / "alias"
+    alias.symlink_to(tools / "links")
+    result = install(repo, alias / "git-reviewer", mode="block", chain=False)
+    assert result.path.exists()

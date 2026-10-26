@@ -646,8 +646,9 @@ exec '/absolute/path/to/git-reviewer' review --hook --mode block
   if the name appeared meanwhile; only git-reviewer's own hook is ever replaced (by rename).
 - The binary must be an absolute path to an executable outside the repository and every one of
   its worktrees (the hook serves them all), at every hop of a chain of symbolic links (the path
-  given, each link, the resolved program): a file or a symlink there is content a checked-out
-  branch controls. A worktree git lists but that is missing is refused, with a hint to run
+  given, each link where it physically lives, its folder resolved, and the resolved program): a
+  file or a symlink there is content a checked-out branch controls, even when it is reached through
+  a folder symlink such as `~/bin` pointing into a repository. A worktree git lists but that is missing is refused, with a hint to run
   `git worktree repair` or `prune`: it may have been moved by hand and still be in use. "Outside" is decided by file identity (device and inode of
   every parent), not by name, since macOS file systems ignore case and Unicode normalization. Like
   the binaries `proc` runs, neither the program nor its directory may be writable by group or
