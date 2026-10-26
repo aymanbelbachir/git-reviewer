@@ -208,11 +208,11 @@ def final_report(state: ReviewState, runtime: Runtime[ReviewContext]) -> dict[st
         ),
         sandbox_note=state.get("sandbox_note"),
         fix_requested=state.get("fix", False),
-        fix=_masked_fix(state.get("fix_proposal"), secrets),
+        fix=_masked_fix(_offerable(state.get("fix_proposal"), secrets), secrets),
         fix_attempts=tuple(
             _masked_attempt(attempt, secrets) for attempt in state.get("fix_attempts", ())
         ),
-        fix_note=_fix_note(state),
+        fix_note=_fix_note(state, secrets),
     )
     return {"report": report}
 
@@ -268,8 +268,17 @@ def _masked_attempt(attempt: PatchAttempt, secrets: tuple[str, ...]) -> PatchAtt
     return attempt.model_copy(update={"reasons": reasons})
 
 
+def _offerable(proposal: FixProposal | None, secrets: tuple[str, ...]) -> FixProposal | None:
+    """The diff the user approves is never masked: what they read is exactly what is written. A
+    proposal whose diff masking would change is not offered (the fix loop already rejects it)."""
+    if proposal is None or sanitize.shows_secret(proposal.diff, secrets):
+        return None
+    return proposal
+
+
 def _masked_fix(proposal: FixProposal | None, secrets: tuple[str, ...]) -> FixProposal | None:
-    """Secrets masked in what is shown; `patched` (never serialized) stays exact for writing."""
+    """Secrets masked in the texts around the diff. The diff itself is shown as is: _offerable
+    guarantees it contains no secret value. `patched` (never serialized) is the exact content."""
     if proposal is None:
         return None
     target = proposal.target.model_copy(
@@ -278,7 +287,6 @@ def _masked_fix(proposal: FixProposal | None, secrets: tuple[str, ...]) -> FixPr
     return proposal.model_copy(
         update={
             "target": target,
-            "diff": sanitize.mask_secrets(proposal.diff, secrets),
             "explanation": sanitize.mask_secrets(proposal.explanation, secrets),
             "alerts": tuple(sanitize.mask_secrets(alert, secrets) for alert in proposal.alerts),
             "tests": None
@@ -290,7 +298,10 @@ def _masked_fix(proposal: FixProposal | None, secrets: tuple[str, ...]) -> FixPr
     )
 
 
-def _fix_note(state: ReviewState) -> str | None:
+def _fix_note(state: ReviewState, secrets: tuple[str, ...]) -> str | None:
+    proposal = state.get("fix_proposal")
+    if proposal is not None and _offerable(proposal, secrets) is None:
+        return "no fix proposed: the patch could only be shown masked, so it is not offered"
     if "fix_note" in state:
         return state["fix_note"]
     rounds = len(state.get("fix_attempts", ()))

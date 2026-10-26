@@ -66,3 +66,9 @@ def mask_secrets(text: str, secrets: tuple[str, ...]) -> str:
         if len(secret) >= _MIN_SECRET_CHARS:
             text = text.replace(secret, _MASK)
     return text
+
+
+def shows_secret(text: str, secrets: tuple[str, ...]) -> bool:
+    """Whether masking would change `text`: a known secret value occurs in it, possibly spanning
+    several lines (gitleaks values come from the reviewed branch and can be multi-line)."""
+    return mask_secrets(text, secrets) != text

@@ -57,8 +57,8 @@ SECURITY.md; section numbers to docs/ARCHITECTURE.md. The phase in brackets is w
   normalization and casefolding.
 - R4.3 Every entry of the deny list in docs/ARCHITECTURE.md §11 is enforced (that list is the single
   source; compare entry by entry), with a test per category.
-- R4.4 The full diff is displayed (sanitized) and applied only after a typed confirmation on a TTY; never
-  in hook or JSON mode.
+- R4.4 The full diff is displayed (sanitized, never masked: a patch that would need masking is not
+  offered) and applied only after a typed confirmation on a TTY; never in hook or JSON mode.
 - R4.5 Targets are re-checked just before applying (TOCTOU: path rules, no symlink, exact reviewed bytes);
   the validated content is written through a new file and a rename, never through a symlink; no
   `git apply`.

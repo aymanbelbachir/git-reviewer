@@ -254,3 +254,51 @@ def test_no_fix_heading_when_nothing_is_proposed(repo: Path) -> None:
     text = render.to_text(fix(repo, FakeLLM(patch=GOOD), FakeSandbox(pytest_outcomes=["failed"])))
     assert "Proposed fix" not in text
     assert "Fix:" in text
+
+
+# --- a diff is never offered for approval in masked form -------------------------------------
+
+
+def test_a_patch_that_would_show_a_secret_is_never_offered(make_repo: Callable[..., Path]) -> None:
+    from tests.helpers import random_token
+
+    token = random_token()
+    repo = staged(make_repo, {"app.py": VULNERABLE, "settings.toml": f'token = "{token}"\n'})
+    leaking = patch_json("app.py", 5, 5, f"{GOOD_LINE}    # was {token}\n")
+    report = fix(repo, FakeLLM(patch=leaking))
+    assert report.fix is None
+    assert "could only be shown masked" in report.fix_attempts[0].reasons[-1]
+
+
+def test_a_file_holding_a_secret_is_not_sent_to_the_author(make_repo: Callable[..., Path]) -> None:
+    from tests.helpers import random_token
+
+    repo = staged(make_repo, {"app.py": VULNERABLE + f'TOKEN = "{random_token()}"\n'})
+    llm = FakeLLM(patch=GOOD)
+    report = fix(repo, llm)
+    assert report.fix is None
+    assert "detected as a secret" in (report.fix_note or "")
+    assert llm.patch_calls == []
+
+
+def test_the_final_report_never_offers_a_diff_masking_would_change() -> None:
+    from git_reviewer.graph.nodes import _fix_note, _offerable
+    from git_reviewer.models import FixProposal, FixTarget
+
+    diff = "diff --git a/a.py b/a.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n+run_hidden()\n"
+    target = FixTarget(
+        source="reviewer", rule="bug", file="a.py", line=1, severity="high", message="m"
+    )
+    proposal = FixProposal(
+        target=target,
+        file="a.py",
+        explanation="e",
+        diff=diff,
+        patched="x = 2\nrun_hidden()\n",
+        original_sha256="0" * 64,
+    )
+    crafted = ("x = 2\n+run_hidden()",)  # a multi-line "secret" spanning an added line
+    assert _offerable(proposal, ()) is proposal
+    assert _offerable(proposal, crafted) is None
+    state = {"fix_proposal": proposal, "fix_attempts": ()}
+    assert "shown masked" in (_fix_note(state, crafted) or "")  # type: ignore[arg-type]

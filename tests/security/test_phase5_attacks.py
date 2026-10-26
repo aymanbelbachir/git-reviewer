@@ -10,6 +10,7 @@ never stages or commits anything (T-18, T-20).
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 from collections.abc import Callable
 from pathlib import Path
@@ -185,3 +186,26 @@ def test_hidden_code_behind_a_utf7_declaration_is_refused(make_repo: Callable[..
     report, sandbox = fooled_review(repo, patch_json("app.py", 1, 1, hidden))
     assert report.fix is None
     assert sandbox.runs == ["pytest", "ruff"]
+
+
+def test_a_crafted_secret_cannot_hide_an_added_line_from_the_approved_diff(
+    make_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # gitleaks values come from the reviewed branch and can span lines (private keys). One
+    # crafted to equal a run of the diff would make masking hide the backdoor line: such a patch
+    # is never offered, so the diff the user approves is always exactly what is written.
+    from git_reviewer.graph import nodes
+
+    # An indirection the deterministic checks cannot follow (T-03): only the masking rule stops it.
+    hidden = "    import os\n    o = os\n    o.system('id')\n"
+    crafted = "+    import os\n+    o = os\n+    o.system('id')"
+    real = nodes.run_static_analysis
+
+    def with_crafted_secret(*args, **kwargs):  # type: ignore[no-untyped-def]
+        result = real(*args, **kwargs)
+        return dataclasses.replace(result, secrets=(*result.secrets, crafted))
+
+    monkeypatch.setattr(nodes, "run_static_analysis", with_crafted_secret)
+    repo = staged(make_repo, {"app.py": APP})
+    report, _sandbox = fooled_review(repo, patch_json("app.py", 5, 5, SAFE + hidden))
+    assert report.fix is None

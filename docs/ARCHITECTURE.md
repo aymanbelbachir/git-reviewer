@@ -559,7 +559,12 @@ After the sandbox runs (also when a run failed):
    output is attacker-controlled. A canary leak by the author blocks the review.
 4. The CLI shows the full diff (sanitized, invisible characters made visible), the author's
    explanation (labelled as such), the test result and any auditor alert, and asks for a typed
-   `yes`. Only on an interactive terminal; never in hook mode or with `--format json` (the JSON
+   `yes`. The diff is never masked: what the user reads is exactly what is written. A secret value
+   found by gitleaks comes from the reviewed branch and can span lines (a crafted private key), so
+   masking could hide an added line; a patch is therefore never offered when a detected secret
+   value occurs in its file, its new content or its diff (checked when choosing the file, in
+   `check_patch`, and again before display). Trade-off: no patch is proposed to remove a hardcoded
+   secret; the user removes it, and rotates it. Only on an interactive terminal; never in hook mode or with `--format json` (the JSON
    carries the diff for display, never the raw new content).
 5. Before writing: `patch.policy` again, then the working tree as it is now: no symlink on the path,
    a regular file inside the repository, and exactly the bytes that were reviewed (TOCTOU; a file

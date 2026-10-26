@@ -56,6 +56,7 @@ _MAX_DIFF_CHARS = 200_000
 _MAX_FAILURE_LINES = 5
 # The user must be able to read every added line in full before typing yes.
 _MAX_ADDED_LINE = 300
+_MASKED_VALUE_REASON = "it contains a value detected as a secret, so it could only be shown masked"
 
 Next = Literal["propose_patch", "check_patch", "validate_patch", "audit_patch", "final_report"]
 
@@ -94,6 +95,11 @@ def prepare_fix(state: ReviewState, runtime: Runtime[ReviewContext]) -> dict[str
         problem = author.source_problem(data)
         if problem:
             reasons.append(f"{target.file}: {problem}")
+            continue
+        if sanitize.shows_secret(data.decode("utf-8"), _secrets(state)):
+            # The diff could only be shown masked, and a masked diff is never offered for
+            # approval: remove the secret yourself (and rotate it).
+            reasons.append(f"{target.file}: {_MASKED_VALUE_REASON}")
             continue
         return {"fix_target": target, "fix_original": data.decode("utf-8"), "fix_attempts": ()}
     reason = reasons[0] if reasons else "no finding of medium severity or more in a Python file"
@@ -138,6 +144,13 @@ def check_patch(state: ReviewState, runtime: Runtime[ReviewContext]) -> dict[str
     added = edits.added_lines(original, candidate.patched)
     if any(len(text) > _MAX_ADDED_LINE for _number, text in added):
         found.append(f"the patch adds a line longer than {_MAX_ADDED_LINE} characters")
+    # A detected secret value can be crafted to span diff lines, so that masking would hide an
+    # added line from the diff the user approves: such a patch is never offered.
+    secrets = _secrets(state)
+    if sanitize.shows_secret(candidate.diff, secrets) or sanitize.shows_secret(
+        candidate.patched, secrets
+    ):
+        found.append(_MASKED_VALUE_REASON)
     return _rejected(state, candidate.number, found) if found else {}
 
 
