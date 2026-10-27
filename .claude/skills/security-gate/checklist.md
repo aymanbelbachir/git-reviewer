@@ -124,7 +124,8 @@ SECURITY.md; section numbers to docs/ARCHITECTURE.md. The phase in brackets is w
 - G0.2 Fail-closed: exception, timeout, invalid JSON or schema violation gives `block`, with tests.
 - G0.3 Isolation: own system prompt, no tools, no reviewer history.
 - G0.4 Strict output schema `{verdict: ok|suspect|block, reasons, lines}`.
-- G0.5 The guardian model is configurable separately from the reviewer model.
+- G0.5 The guardian model and its context window are configurable separately from the reviewer's,
+  and every guardian call is sized against the guardian's own context.
 - G0.6 Every decision is logged without code or secrets and shown in the security report.
 
 ## G1. Anti-injection guardian [phase 3]
@@ -135,7 +136,8 @@ SECURITY.md; section numbers to docs/ARCHITECTURE.md. The phase in brackets is w
   including instructions split across lines and imitations of the data delimiters.
 - G1.4 Agent classifies the flagged passages and every added comment, string and non-Python line,
   and returns line references. It sees every flagged passage (in batches; what it cannot see whole
-  blocks); other lines it has no room for raise an alert.
+  blocks); other lines it has no room for raise an alert. It may block a flagged passage; on the
+  other lines its verdict is capped at an alert, while a guardian failure still blocks. With tests.
 - G1.5 Canary token in the reviewer system prompt; its presence in the output blocks, also when
   JSON-escaped, re-cased, split by punctuation or written in fullwidth letters.
 - G1.6 Cross-check: a static finding ignored or downgraded by the reviewer raises a probable-injection alert.

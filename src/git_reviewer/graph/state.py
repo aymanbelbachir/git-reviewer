@@ -63,6 +63,7 @@ class ReviewContext:
     limits: DiffLimits
     max_review_chars: int
     model_context_tokens: int
+    guardian_context_tokens: int
     reviewer: ChatFn
     guardian: ChatFn
     sandbox: Sandbox | None = None

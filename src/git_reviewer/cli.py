@@ -63,6 +63,11 @@ EXIT_FINDINGS = 1
 EXIT_BLOCKED = 2
 EXIT_USAGE = 3
 EXIT_ENVIRONMENT = 4
+
+_SAME_MODEL_TWO_CONTEXTS = (
+    "the reviewer and the guardians use the same model with different contexts, so Ollama "
+    "reloads it between calls: give guardian_context_tokens the value of model_context_tokens"
+)
 MIN_GIT_VERSION = (2, 40)
 
 
@@ -122,6 +127,7 @@ def review(
             limits=DiffLimits(settings.max_diff_bytes, settings.max_files, settings.max_line_chars),
             max_review_chars=settings.max_review_chars,
             model_context_tokens=settings.model_context_tokens,
+            guardian_context_tokens=settings.guardian_context_tokens,
             reviewer=reviewer,
             guardian=guardian,
             sandbox=sandbox,
@@ -173,13 +179,13 @@ def doctor() -> None:
     try:
         endpoint = validate_url(settings.ollama_url)
         _line("OK", "ollama url", endpoint.base_url)
-        for name, model in (
-            ("reviewer model", settings.reviewer_model),
-            ("guardian model", settings.guardian_model),
+        for name, model, context in (
+            ("reviewer model", settings.reviewer_model, settings.model_context_tokens),
+            ("guardian model", settings.guardian_model, settings.guardian_context_tokens),
         ):
             try:
                 check_model(endpoint, model)
-                _line("OK", name, model)
+                _line("OK", name, f"{model} (context {context:,} tokens)")
             except OllamaError as exc:
                 failed = True
                 _line("FAIL", name, str(exc))
@@ -188,6 +194,11 @@ def doctor() -> None:
     except UnsafeOllamaUrlError as exc:
         failed = True
         _line("FAIL", "ollama url", str(exc))
+    if (
+        settings.reviewer_model == settings.guardian_model
+        and settings.model_context_tokens != settings.guardian_context_tokens
+    ):
+        _line("WARN", "model contexts", _SAME_MODEL_TWO_CONTEXTS)
     failed |= not _check_binary("gitleaks", required=True)
     if _check_binary("docker", required=False, note="needed for --run-tests"):
         _check_docker(settings)
@@ -289,13 +300,20 @@ def _require_ollama(settings: Settings) -> tuple[ChatFn, ChatFn]:
     # Only once Ollama answered: on an unreachable server the listener check has nothing to see.
     for warning in exposure_warnings(endpoint):
         typer.echo(f"warning: {sanitize.one_line(warning)}", err=True)
-    options = {
-        "timeout": settings.ollama_timeout_seconds,
-        "num_ctx": settings.model_context_tokens,
-    }
+    timeout = settings.ollama_timeout_seconds
     return (
-        ollama_chat(endpoint, settings.reviewer_model, **options),
-        ollama_chat(endpoint, settings.guardian_model, **options),
+        ollama_chat(
+            endpoint,
+            settings.reviewer_model,
+            timeout=timeout,
+            num_ctx=settings.model_context_tokens,
+        ),
+        ollama_chat(
+            endpoint,
+            settings.guardian_model,
+            timeout=timeout,
+            num_ctx=settings.guardian_context_tokens,
+        ),
     )
 
 

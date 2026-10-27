@@ -111,7 +111,7 @@ tests/
 | `git-reviewer review [--range A..B] [--run-tests] [--fix] [--format text\|json] [--mode block\|warn]` | Run the review graph. |
 | `git-reviewer install-hook [--mode block\|warn] [--chain]` | Install the pre-commit hook (§13). |
 | `git-reviewer uninstall-hook` | Remove our hook, restore a chained one. |
-| `git-reviewer doctor` | Check git, Ollama (local, models present, not cloud), gitleaks and, as warnings since only `--run-tests` needs them, Docker (local endpoint, daemon, sandbox image) and leftover sandbox containers. |
+| `git-reviewer doctor` | Check git, Ollama (local, models present with their context sizes, not cloud; a warning when one model is set to run at two contexts, which Ollama reloads at every switch), gitleaks and, as warnings since only `--run-tests` needs them, Docker (local endpoint, daemon, sandbox image) and leftover sandbox containers. |
 
 `--fix` implies `--run-tests`: a patch is only shown after it passed the sandbox validation. It
 is refused with `--hook` (a git hook cannot ask for the confirmation), never applied with
@@ -238,8 +238,9 @@ Design rules:
   canary included. So the whole prompt must fit `model_context_tokens` (default 32,768, minimum
   8,192) with 4,096 tokens left for the answer (`num_predict`). Checked twice: before the call, at
   two UTF-8 bytes per token; after it, against the prompt token count Ollama reports. Either check
-  failing means "not reviewed". The guardian, which reads the most hostile text, is sized at one
-  byte per token, a strict upper bound (§10.1).
+  failing means "not reviewed". The guardians, which read the most hostile text, have their own
+  context (`guardian_context_tokens`, default 12,288) and are sized at one byte per token, a strict
+  upper bound (§10.1).
 
 ### 6.3 LLM output
 - Ollama is called with `format=<JSON schema>` (constrained decoding) and temperature 0. The raw
@@ -413,12 +414,17 @@ docker --host unix://<validated socket> run
   (`~/.config/git-reviewer/config.toml`). **No configuration is read from the reviewed repository**
   in v1: a malicious branch could otherwise point `ollama_url` at a remote host or loosen limits (T-27).
 - Keys: `ollama_url`, `reviewer_model`, `guardian_model` (separate from the reviewer, as the spec
-  requires), timeouts, size limits, severity threshold, `sandbox_image` and
+  requires), `model_context_tokens` and `guardian_context_tokens` (each one's context window,
+  8,192 to 131,072), timeouts, size limits, severity threshold, `sandbox_image` and
   `sandbox_timeout_seconds` (10 to 1,800, default 300). The sandbox's memory, CPU and process
   limits are fixed in code, not configurable. Security limits have hard upper bounds in code.
-- Defaults to settle in phase 2: reviewer `qwen2.5-coder:7b` (fits a 16 GB machine; `:14b` if
-  memory allows). The guardian model should come from a different model family, so an injection
-  tuned for one model is less likely to fool both; the choice is driven by the red-team metrics.
+- Defaults, chosen by measurement (SECURITY.md §7): the reviewer is `qwen2.5-coder:7b` with
+  32,768 tokens of context; the guardians use `qwen2.5-coder:14b` with 12,288. A model of another
+  family would in principle resist an injection tuned against the reviewer better, but the one
+  measured (`llama3.1:8b`) caught far fewer attacks. At 12,288 tokens the 14b stays entirely on
+  the GPU of a 16 GB machine; at 32,768 it needs 15 GB, part of it runs on the CPU and it is about
+  ten times slower. The two models do not fit in 16 GB together, so Ollama swaps them during a
+  review. On a smaller machine `guardian_model = "qwen2.5-coder:7b"` works, with lower detection.
 - **Ollama checks at startup:** URL scheme `http`, no credentials, host resolving only to loopback
   addresses; model present in `/api/tags`; cloud models refused (`*-cloud` tags or a remote host
   reported by Ollama), since local Ollama would forward the code; a warning if Ollama listens on
@@ -476,14 +482,20 @@ Before the review:
   more words in a row), and every added line of other files (READMEs, docs, configuration,
   lockfiles: any file can be named `uv.lock`), each with one neighbour on each side,
   nonce-delimited. A fixed phrase list misses most text addressed to a reviewer ("this call
-  was approved"), so the agent reads it all and may raise to "suspect" or "block". Line references
-  it returns that it was not shown are dropped. Cost: one model call on most commits.
+  was approved"), so the agent reads it all. It may raise a flagged passage to "suspect" or
+  "block", but the other lines only to "suspect": on real commits (this project's own security
+  docs, a plain error message) its blocks on ordinary text were mostly false, and a block stops the
+  commit even in warn mode. A guardian failure still blocks. Line references it returns that it
+  was not shown are dropped. Cost: one model call on most commits, more on changes with many
+  comments or docs.
 - The passages are sent in batches of at most 20,000 UTF-8 bytes, fewer when the context window is
   small (every token is at least one byte, so a batch always fits next to the system prompt and the
   answer). Nothing is truncated: flagged passages that need more than 5 batches, or a flagged line
   too long for one batch, are a **block**, since the guardian could not see everything. The other
   lines are checked with the calls left; those that do not fit, or are too long, raise an alert
-  naming them (with the default context, a change small enough for the reviewer always fits).
+  naming them. With the default guardian context a batch holds about 5.6 kB, so the 5 calls cover
+  about 28 kB of passages (100 kB at 32,768 tokens): a larger change full of comments or docs gets
+  the alert, never a silent skip.
 
 After the review:
 - Canary: a random 128-bit token in the reviewer's system prompt; if it appears anywhere in the
@@ -505,7 +517,8 @@ Before the sandbox runs:
   It flags network access, subprocesses, reads
   outside the repo, environment harvesting, `eval`/`exec`/`compile`, `__import__`/`getattr` chains,
   encoded payloads and tampering with the test run. Lines are sent in batches that fit its context
-  (like the anti-injection agent); more than 5 batches, or a failure, is a block. A block means the
+  (like the anti-injection agent; about 26 kB of lines in all with the default guardian context);
+  more than 5 batches, or a failure, is a block. A block means the
   tests are not run, even in the sandbox (defense in depth against container escapes). When no test
   infrastructure changed, the agent is not called.
 
@@ -534,6 +547,8 @@ After the sandbox runs (also when a run failed):
   block the review, whose change is not the patch.
 - `patch.policy` and `patch.checks` run before it and have the final say: the auditor can reject
   what they accepted, never the reverse.
+- The finding and the patch must fit its context in one call (about 5.8 kB with the default
+  guardian context); a larger patch is rejected, never shown in part.
 
 ## 11. Patch flow
 0. One finding is chosen: the most severe one of medium severity or more, in a Python file of the
@@ -575,7 +590,8 @@ After the sandbox runs (also when a run failed):
    gitleaks on both versions of the file: a patch is refused when a finding of medium severity or
    more, a hardcoded password or a secret lands on a line it adds or changes (also a risky call
    moved into a new helper), or when one rule's count goes up. These are denylists: they refuse
-   the common forms, not every possible one (SECURITY.md T-03); then the execution
+   the common forms, not every possible one (SECURITY.md T-03); a patch the auditor could not read
+   whole in its context is refused here too, before it runs; then the execution
    guardian (argv barrier, and the agent when the file is test infrastructure); then the sandbox
    run of pytest on the copy with the patch (the copy is restored to the reviewed version
    afterwards), followed by the fingerprint and leftover-container checks; then, for a scanner
@@ -713,9 +729,10 @@ exec '/absolute/path/to/git-reviewer' review --hook --mode block
   right directory, unique ids), refuses a run with a guardian failure or without both kinds of
   samples, runs each guardian as a review does, and computes per guardian the detection rate
   on malicious samples, the false-positive rate on clean ones, what the deterministic layer catches
-  alone and, for patches, the whole pipeline; it lists the misses. The `red-team` skill writes
-  these into `SECURITY.md` between markers. The malicious samples are the user's examples
-  (CLAUDE.md); the clean ones are legitimate code that looks unusual.
+  alone and, for patches, the whole pipeline; it lists the misses. `--model` measures another
+  local model with the same checks, which is how the guardian model was chosen (§9). The
+  `red-team` skill writes these into `SECURITY.md` between markers. The malicious samples are the
+  user's examples (CLAUDE.md); the clean ones are legitimate code that looks unusual.
 - `tests/security/README.md` maps each attack the spec requires to the test that proves it fails.
 
 ## 16. Phase map

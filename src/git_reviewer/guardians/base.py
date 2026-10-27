@@ -21,6 +21,7 @@ MAX_BATCH_BYTES = 20_000
 MAX_GUARDIAN_CALLS = 5
 FAILURE_PREFIX = "guardian failed"
 _PROMPT_MARGIN_TOKENS = 1_024
+_CAPPED_REASON = "no deterministic check flagged these lines"
 
 Row = tuple[str, LineRef]
 """One line shown to a guardian agent (`path:line: text`) and the reference it may cite."""
@@ -57,9 +58,11 @@ def run_guardian(
     user: str,
     *,
     allowed_lines: frozenset[LineRef] | None = None,
+    max_verdict: Verdict = "block",
 ) -> Decision:
-    """Ask a guardian agent. Any failure blocks. Line references outside `allowed_lines` are
-    dropped: an agent cannot point the report at lines it was not shown."""
+    """Ask a guardian agent. Any failure blocks, whatever `max_verdict` says; the agent's own
+    verdict is capped at `max_verdict`. Line references outside `allowed_lines` are dropped: an
+    agent cannot point the report at lines it was not shown."""
     try:
         output, _raw = ask_json(chat, system, user, GuardianOutput)
     # Fail closed on every error, timeouts and invalid answers included.
@@ -68,7 +71,11 @@ def run_guardian(
     lines = [LineRef(file=ref.file, line=ref.line) for ref in output.lines]
     if allowed_lines is not None:
         lines = [ref for ref in lines if ref in allowed_lines]
-    return decision(source, output.verdict, output.reasons, lines)
+    verdict, reasons = output.verdict, list(output.reasons)
+    if VERDICT_RANK[verdict] > VERDICT_RANK[max_verdict]:
+        reasons.insert(0, f"rated {verdict}, reported as {max_verdict}: {_CAPPED_REASON}")
+        verdict = max_verdict
+    return decision(source, verdict, reasons, lines)
 
 
 def run_guardian_batches(
@@ -83,8 +90,11 @@ def run_guardian_batches(
 ) -> list[Decision]:
     """Show every row to the agent, in batches that fit its context window. Nothing is ever
     truncated: rows that need more than MAX_GUARDIAN_CALLS batches, or a row too long for one
-    batch, block, since the agent could not see everything. `optional` rows are checked with the
-    calls left; those that do not fit raise an alert ("suspect"), not a block."""
+    batch, block, since the agent could not see everything. `optional` rows are lines no
+    deterministic check flagged: they are checked with the calls left, in batches of their own,
+    and raise at most an alert ("suspect"), both when the agent would block them and when they do
+    not fit. On ordinary comments and docs the agent's blocks were mostly false and stopped
+    honest commits. A failure still blocks."""
     # Every token is at least one UTF-8 byte, so a batch of this many bytes always fits.
     budget = context_tokens - ANSWER_TOKENS - len(system.encode()) - _PROMPT_MARGIN_TOKENS
     max_bytes = min(MAX_BATCH_BYTES, budget)
@@ -106,9 +116,14 @@ def run_guardian_batches(
         count = sum(text.count("\n") + 1 for text, _shown in extra[room:])
         reason = f"{count} more line(s) were not checked: too many for the guardian's calls"
         found.append(decision(source, "suspect", [reason], left_over))
-    for text, shown in [*batches, *extra[:room]]:
+    for text, shown in batches:
         user = user_prompt(text, prompts.new_nonce())
         found.append(run_guardian(source, chat, system, user, allowed_lines=shown))
+    for text, shown in extra[:room]:
+        user = user_prompt(text, prompts.new_nonce())
+        found.append(
+            run_guardian(source, chat, system, user, allowed_lines=shown, max_verdict="suspect")
+        )
     return found
 
 

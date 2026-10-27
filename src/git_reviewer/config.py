@@ -34,10 +34,9 @@ class Settings(BaseModel):
 
     ollama_url: str = "http://127.0.0.1:11434"
     reviewer_model: str = Field(default="qwen2.5-coder:7b", pattern=_MODEL_NAME)
-    # Separate from the reviewer, as the spec requires. A model of another family would resist an
-    # injection that fools the reviewer better; the default stays until it can be measured
-    # (SECURITY.md §7).
-    guardian_model: str = Field(default="qwen2.5-coder:7b", pattern=_MODEL_NAME)
+    # Separate from the reviewer, as the spec requires. Chosen by measurement (SECURITY.md §7): it
+    # caught more than the 7b and than llama3.1:8b, a model of another family.
+    guardian_model: str = Field(default="qwen2.5-coder:14b", pattern=_MODEL_NAME)
     ollama_timeout_seconds: float = Field(default=120.0, gt=0, le=600)
     max_diff_bytes: int = Field(default=1024 * 1024, ge=1024, le=5 * 1024 * 1024)
     max_files: int = Field(default=200, ge=1, le=1000)
@@ -46,6 +45,9 @@ class Settings(BaseModel):
     max_review_chars: int = Field(default=60_000, ge=1_000, le=200_000)
     # At least twice the 4096 tokens reserved for the model's answer.
     model_context_tokens: int = Field(default=32_768, ge=8_192, le=131_072)
+    # The guardian model's own context: at 12,288 the 14b stays entirely on the GPU of a 16 GB
+    # machine. Guardians split what they read to fit it, and block or alert on what does not fit.
+    guardian_context_tokens: int = Field(default=12_288, ge=8_192, le=131_072)
     severity_threshold: Severity = "high"
     # The sandbox image the user built (docs/ARCHITECTURE.md §8.2); never built or pulled by us.
     sandbox_image: str = Field(default="git-reviewer-sandbox:0.1", pattern=_IMAGE_REF)

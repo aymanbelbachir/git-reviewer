@@ -18,6 +18,11 @@ def test_defaults(tmp_path: Path) -> None:
     settings = load_settings(environ={}, path=tmp_path / "missing.toml")
     assert settings == Settings()
     assert settings.ollama_url == "http://127.0.0.1:11434"
+    # The guardian has its own model and context, chosen by measurement (SECURITY.md §7).
+    reviewer = (settings.reviewer_model, settings.model_context_tokens)
+    guardian = (settings.guardian_model, settings.guardian_context_tokens)
+    assert reviewer == ("qwen2.5-coder:7b", 32_768)
+    assert guardian == ("qwen2.5-coder:14b", 12_288)
 
 
 def test_precedence_cli_over_env_over_file(tmp_path: Path) -> None:
@@ -41,6 +46,8 @@ def test_xdg_config_home_is_used(tmp_path: Path) -> None:
         "max_diff_bytes = 999999999\n",
         "ollama_timeout_seconds = 0\n",
         "model_context_tokens = 4096\n",
+        "guardian_context_tokens = 4096\n",
+        "guardian_context_tokens = 1000000\n",
         'severity_threshold = "none"\n',
         'reviewer_model = "bad model; rm -rf"\n',
         "unknown_key = 1\n",

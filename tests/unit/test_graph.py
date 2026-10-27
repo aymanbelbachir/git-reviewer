@@ -86,6 +86,24 @@ def test_prompt_that_may_not_fit_the_context_is_not_reviewed(repo: Path) -> None
     assert llm.reviewer_calls == []
 
 
+@pytest.mark.parametrize(("guardian_context", "checked"), [(32_768, True), (8_192, False)])
+def test_the_guardian_reads_within_its_own_context(
+    make_repo: Callable[..., Path], guardian_context: int, checked: bool
+) -> None:
+    # A 3 kB comment fits a guardian batch at 32k, not at 8k (about 1.5 kB per batch): it is
+    # then reported as not checked. The reviewer keeps its own, larger context either way.
+    repo = make_repo()
+    write_files(repo, {"a.py": f"# {'note ' * 600}\n{CODE}"})
+    git(repo, "add", "-A")
+    llm = FakeLLM()
+    report = review(repo, llm, guardian_context_tokens=guardian_context)
+    assert report.status == "reviewed" and len(llm.reviewer_calls) == 1
+    shown = "\n".join(user for _system, user in llm.guardian_calls)
+    assert ("note note" in shown) is checked
+    too_long = [d for d in report.decisions if any("too long" in r for r in d.reasons)]
+    assert bool(too_long) is not checked
+
+
 def test_static_coverage_is_reported(repo: Path) -> None:
     report = review(repo, FakeLLM())
     assert dict(report.coverage) == {"ruff": 1, "bandit": 1, "gitleaks": 1}

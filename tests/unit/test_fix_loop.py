@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 
@@ -89,6 +90,43 @@ def test_patch_that_does_not_remove_the_finding_is_rejected(repo: Path) -> None:
     report = fix(repo, FakeLLM(patch=unrelated))
     assert report.fix is None
     assert "bandit still reports B602" in report.fix_attempts[0].reasons[0]
+
+
+@pytest.mark.parametrize(("guardian_context", "too_large"), [(12_288, True), (32_768, False)])
+def test_a_patch_the_auditor_cannot_read_whole_never_runs(
+    repo: Path, guardian_context: int, too_large: bool
+) -> None:
+    # About 9 kB of added comments (two edits: one edit holds at most 5,000 characters): more
+    # than the auditor reads at 12,288 tokens (about 5.8 kB), less than at 32,768. Rejected
+    # before the sandbox, not after a wasted run.
+    notes = "".join(f"# note {n:03}: {'keep the arguments as a list ' * 2}\n" for n in range(60))
+    indented = "".join(f"    {line}\n" for line in notes.splitlines())
+    padded = json.dumps(
+        {
+            "edits": [
+                {"path": "app.py", "start_line": 4, "end_line": 3, "replacement": notes},
+                {
+                    "path": "app.py",
+                    "start_line": 5,
+                    "end_line": 5,
+                    "replacement": indented + GOOD_LINE,
+                },
+            ],
+            "explanation": "pass the arguments as a list",
+        }
+    )
+    sandbox = FakeSandbox()
+    report = run_graph(
+        repo,
+        FakeLLM(patch=padded),
+        sandbox=sandbox,
+        fix=True,
+        guardian_context_tokens=guardian_context,
+    )
+    reasons = " ".join(r for a in report.fix_attempts for r in a.reasons)
+    assert ("too large for the patch auditor" in reasons) is too_large
+    assert (sandbox.runs == ["pytest", "ruff"]) is too_large  # only the baseline
+    assert (report.fix is not None) is not too_large
 
 
 def auditor_says(answer: str) -> Callable[[str, str], str]:

@@ -2,6 +2,7 @@
 SECURITY.md §7). Run by hand or by the red-team skill:
 
     uv run --locked python scripts/eval_guardians.py [--guardian NAME] [--format text|json]
+        [--model NAME]
 
 Each sample goes through its guardian as in a real review:
 - injection: the "before" step, the deterministic barrier then the agent on the flagged lines and
@@ -13,8 +14,9 @@ the deterministic layer catches alone (the barrier; for patches, patch.checks th
 gitleaks on both versions), and for patches the whole pipeline, where those rules run first and
 have the final say. Samples are split into "dev" and "test" (see Sample.split).
 
-Samples are data: they are parsed, never executed. The model is the configured guardian model on
-the loopback Ollama, checked as `git-reviewer review` checks it.
+Samples are data: they are parsed, never executed. The model is the configured guardian model, or
+the one given with --model to compare models, on the loopback Ollama, checked as
+`git-reviewer review` checks it.
 """
 
 from __future__ import annotations
@@ -338,8 +340,10 @@ def _brief(sample: Sample) -> dict[str, str]:
     return {"id": sample.id, "technique": sample.technique, "description": sample.description}
 
 
-def _guardian_chat() -> tuple[ChatFn, str, int]:
-    settings = load_settings()
+def _guardian_chat(model: str | None = None) -> tuple[ChatFn, str, int]:
+    """The configured guardian model, or `model` (checked like a configured one: a local model
+    on the loopback Ollama, never a cloud one)."""
+    settings = load_settings(overrides={"guardian_model": model})
     endpoint = validate_url(settings.ollama_url)
     check_model(endpoint, settings.guardian_model, timeout=settings.ollama_timeout_seconds)
     for warning in exposure_warnings(endpoint):
@@ -348,19 +352,20 @@ def _guardian_chat() -> tuple[ChatFn, str, int]:
         endpoint,
         settings.guardian_model,
         timeout=settings.ollama_timeout_seconds,
-        num_ctx=settings.model_context_tokens,
+        num_ctx=settings.guardian_context_tokens,
     )
-    return chat, settings.guardian_model, settings.model_context_tokens
+    return chat, settings.guardian_model, settings.guardian_context_tokens
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("--guardian", choices=[*GUARDIANS, "all"], default="all")
     parser.add_argument("--format", choices=["text", "json"], default="text")
+    parser.add_argument("--model", help="guardian model to measure instead of the configured one")
     args = parser.parse_args(argv)
     try:
         samples = load_samples()
-        chat, model, context_tokens = _guardian_chat()
+        chat, model, context_tokens = _guardian_chat(args.model)
     except (DatasetError, ConfigError, OllamaError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

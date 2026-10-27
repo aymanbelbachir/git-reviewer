@@ -73,6 +73,21 @@ def test_review_exit_codes_follow_findings_and_mode(
     assert runner.invoke(cli.app, ["review", "--mode", "warn"]).exit_code == cli.EXIT_OK
 
 
+def test_reviewer_and_guardian_get_their_own_model_and_context(
+    staged_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, int]] = []
+
+    def chat(endpoint: object, model: str, *, timeout: float, num_ctx: int) -> FakeLLM:
+        calls.append((model, num_ctx))
+        return FakeLLM()
+
+    monkeypatch.setattr(cli, "ollama_chat", chat)
+    monkeypatch.setenv(ENV_PREFIX + "GUARDIAN_CONTEXT_TOKENS", "16384")
+    assert runner.invoke(cli.app, ["review"]).exit_code == cli.EXIT_OK
+    assert calls == [("qwen2.5-coder:7b", 32_768), ("qwen2.5-coder:14b", 16_384)]
+
+
 def test_review_json_output(staged_repo: Path) -> None:
     result = runner.invoke(cli.app, ["review", "--format", "json"])
     data = json.loads(result.stdout)
@@ -231,6 +246,24 @@ def test_doctor_requires_git_2_40(monkeypatch: pytest.MonkeyPatch) -> None:
     old = proc.Result(0, b"git version 2.39.5\n", b"")
     monkeypatch.setattr(cli.proc, "run", lambda *args, **kwargs: old)
     assert cli._check_git() is False  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(
+    ("guardian", "warned"), [("qwen2.5-coder:14b", False), ("qwen2.5-coder:7b", True)]
+)
+def test_doctor_shows_each_models_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, guardian: str, warned: bool
+) -> None:
+    # The same model at two contexts is reloaded by Ollama at every switch: doctor says so.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv(ENV_PREFIX + "GUARDIAN_MODEL", guardian)
+    monkeypatch.setattr(cli, "_check_binary", lambda *args, **kwargs: True)
+    monkeypatch.setattr(cli, "_check_docker", lambda settings: None)
+    out = runner.invoke(cli.app, ["doctor"]).output
+    assert "reviewer model   qwen2.5-coder:7b (context 32,768 tokens)" in out
+    assert f"guardian model   {guardian} (context 12,288 tokens)" in out
+    assert ("[WARN] model contexts" in out) is warned
 
 
 def test_no_arguments_prints_help(

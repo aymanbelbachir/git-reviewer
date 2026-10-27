@@ -4,6 +4,34 @@ A 100% local code reviewer hooked into git: it analyzes your diffs with LangGrap
 
 > Work in progress. The full specification is in [docs/SPEC.md](docs/SPEC.md).
 
+## Models
+
+git-reviewer uses two local models through Ollama and never downloads them itself:
+
+```
+ollama pull qwen2.5-coder:7b
+ollama pull qwen2.5-coder:14b
+```
+
+The 7b reviews the change; the 14b runs the guardians, the checks that watch for manipulation,
+because it caught the most attacks in our measurements ([SECURITY.md](SECURITY.md) §7). The
+guardians use a 12,288-token context (`guardian_context_tokens`) so that the 14b stays entirely on
+the GPU of a 16 GB Mac; the reviewer keeps 32,768 (`model_context_tokens`). The two models do not
+fit in 16 GB together, so Ollama swaps them during a review. On a 16 GB M1 Pro, the commits we timed
+(53 and 116 added lines, mostly documentation) took about two minutes each; the guardians read
+every added comment and documentation line, so changes with fewer of them go faster.
+
+With less memory, use the 7b for both (it catches fewer attacks), in
+`~/.config/git-reviewer/config.toml`:
+
+```
+guardian_model = "qwen2.5-coder:7b"
+guardian_context_tokens = 32768
+```
+
+With 32 GB or more, `guardian_context_tokens = 32768` lets the guardians read more of a large
+change in one review.
+
 ## Running the tests in the sandbox
 
 `git-reviewer review --run-tests` runs the project's tests (pytest) and linter (ruff) in a Docker

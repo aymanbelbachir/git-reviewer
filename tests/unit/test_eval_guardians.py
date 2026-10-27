@@ -133,7 +133,7 @@ def test_a_run_with_guardian_failures_exits_with_an_error(
     samples = ev.load_samples(tmp_path)
     monkeypatch.setattr(ev, "load_samples", lambda: samples)
     failing = FakeLLM(guardian=TimeoutError("slow"))
-    monkeypatch.setattr(ev, "_guardian_chat", lambda: (failing, "model", 32_768))
+    monkeypatch.setattr(ev, "_guardian_chat", lambda model=None: (failing, "model", 32_768))
     assert ev.main(["--guardian", "execution", "--format", "json"]) == 1
     assert "rates are not valid" in capsys.readouterr().err
 
@@ -144,7 +144,7 @@ def test_a_guardian_without_both_kinds_of_samples_is_not_measured(
     store(tmp_path, sample("exe-0001", "execution", "malicious", {"diff": TEST_DIFF}))
     samples = ev.load_samples(tmp_path)
     monkeypatch.setattr(ev, "load_samples", lambda: samples)
-    monkeypatch.setattr(ev, "_guardian_chat", lambda: (FakeLLM(), "model", 32_768))
+    monkeypatch.setattr(ev, "_guardian_chat", lambda model=None: (FakeLLM(), "model", 32_768))
     assert ev.main(["--guardian", "execution"]) == 1
     assert "needs malicious and clean samples" in capsys.readouterr().err
 
@@ -235,3 +235,22 @@ def test_samples_are_split_into_dev_and_test(tmp_path: Path) -> None:
     splits = summary["execution"]["splits"]
     assert splits["dev"]["detected"] == 1 and splits["test"]["false_positives"] == 1
     assert [r["split"] for r in summary["execution"]["results"]] == ["dev", "test", "dev", "test"]
+
+
+def test_a_model_given_on_the_command_line_is_checked_like_a_configured_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from git_reviewer.config import ConfigError
+    from git_reviewer.llm.ollama import CloudModelError
+
+    checked: list[str] = []
+    monkeypatch.setattr(ev, "check_model", lambda endpoint, model, timeout: checked.append(model))
+    monkeypatch.setattr(ev, "exposure_warnings", lambda endpoint: [])
+    monkeypatch.setattr(ev, "ollama_chat", lambda endpoint, model, **options: FakeLLM())
+    _chat, model, _tokens = ev._guardian_chat("llama3.1:8b")  # pyright: ignore[reportPrivateUsage]
+    assert model == "llama3.1:8b" and checked == ["llama3.1:8b"]
+    with pytest.raises(ConfigError):
+        ev._guardian_chat("--evil")  # pyright: ignore[reportPrivateUsage]
+    monkeypatch.undo()
+    with pytest.raises(CloudModelError):
+        ev._guardian_chat("gpt-oss:120b-cloud")  # pyright: ignore[reportPrivateUsage]

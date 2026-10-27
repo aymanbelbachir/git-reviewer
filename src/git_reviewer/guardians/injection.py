@@ -3,9 +3,10 @@
 Before: the deterministic barrier scans the diff. Unless it blocks, an isolated guardian agent
 classifies the flagged passages and every added comment, string and line of a non-Python file
 (where text addressed to an AI hides; a fixed phrase list misses most of it), each with its
-neighbours, and may raise to "suspect" or "block". Passages are sent in batches that fit the
-guardian's context: flagged ones that need too many batches block the change; other lines left
-over raise an alert.
+neighbours. It may raise the flagged passages to "suspect" or "block", the other lines only to
+"suspect": an alert, since its blocks on ordinary comments and docs were mostly false. Passages are
+sent in batches that fit the guardian's context: flagged ones that need too many batches block the
+change; other lines left over raise an alert.
 After: the reviewer's output must not contain the canary token (block) or the delimiter nonce
 (suspect), even escaped, re-cased or split by punctuation; and every static finding of medium
 severity or more must be mentioned by the reviewer without being downgraded, otherwise a

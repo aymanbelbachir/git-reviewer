@@ -52,7 +52,7 @@ def static_analysis(state: ReviewState, runtime: Runtime[ReviewContext]) -> dict
 def injection_guard_pre(state: ReviewState, runtime: Runtime[ReviewContext]) -> dict[str, Any]:
     ctx = runtime.context
     found = guard_before_review(
-        _need(state, "diff"), ctx.guardian, context_tokens=ctx.model_context_tokens
+        _need(state, "diff"), ctx.guardian, context_tokens=ctx.guardian_context_tokens
     )
     return {"decisions": tuple(found)}
 
@@ -129,7 +129,7 @@ def execution_guard_pre(state: ReviewState, runtime: Runtime[ReviewContext]) -> 
     found = [execution.check_argv(plans)]
     if found[0].verdict != "block":
         found += execution.check_test_changes(
-            _need(state, "diff"), ctx.guardian, context_tokens=ctx.model_context_tokens
+            _need(state, "diff"), ctx.guardian, context_tokens=ctx.guardian_context_tokens
         )
     return {"decisions": tuple(found), "run_id": run_id, "image_id": image_id}
 

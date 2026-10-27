@@ -149,6 +149,10 @@ def check_patch(state: ReviewState, runtime: Runtime[ReviewContext]) -> dict[str
             found.append(f"cannot run the scanners on the patched file: {exc}")
     if len(candidate.diff) > _MAX_DIFF_CHARS:
         found.append("the patch is too large")
+    elif not patch_auditor.fits(
+        target, candidate.diff, context_tokens=runtime.context.guardian_context_tokens
+    ):
+        found.append("the patch is too large for the patch auditor to read it whole")
     added = edits.added_lines(original, candidate.patched)
     if any(len(text) > _MAX_ADDED_LINE for _number, text in added):
         found.append(f"the patch adds a line longer than {_MAX_ADDED_LINE} characters")
@@ -184,7 +188,7 @@ def validate_patch(state: ReviewState, runtime: Runtime[ReviewContext]) -> dict[
             prompts.EXECUTION_GUARDIAN_SYSTEM_PROMPT,
             prompts.execution_guardian_user_prompt,
             rows,
-            context_tokens=ctx.model_context_tokens,
+            context_tokens=ctx.guardian_context_tokens,
         )
         if worst(found) == "block":
             reasons = ["the execution guardian refused to run the patched tests"]
@@ -232,7 +236,7 @@ def audit_patch(state: ReviewState, runtime: Runtime[ReviewContext]) -> dict[str
     candidate = _candidate(state)
     added = edits.added_lines(original, candidate.patched)
     found = patch_auditor.audit(
-        target, candidate.diff, added, ctx.guardian, context_tokens=ctx.model_context_tokens
+        target, candidate.diff, added, ctx.guardian, context_tokens=ctx.guardian_context_tokens
     )
     if found.verdict == "block":
         reasons = ["the patch auditor rejected it", *(f"patch auditor: {r}" for r in found.reasons)]

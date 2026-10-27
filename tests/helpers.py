@@ -75,6 +75,7 @@ def run_graph(
     *,
     max_chars: int = 60_000,
     context_tokens: int = 32_768,
+    guardian_context_tokens: int = 32_768,
     sandbox: Sandbox | None = None,
     fix: bool = False,
 ) -> Report:
@@ -87,6 +88,7 @@ def run_graph(
         limits=LIMITS,
         max_review_chars=max_chars,
         model_context_tokens=context_tokens,
+        guardian_context_tokens=guardian_context_tokens,
         reviewer=llm,
         guardian=llm,
         sandbox=sandbox,
