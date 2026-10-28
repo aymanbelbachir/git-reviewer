@@ -103,7 +103,7 @@ SECURITY.md; section numbers to docs/ARCHITECTURE.md. The phase in brackets is w
 ## R8. Supply chain [phase 2]
 - R8.1 `uv.lock` is committed; runtime dependencies are minimal (list them, flag anything unexpected).
 - R8.2 Installs use `--locked` (hashes come from `uv.lock`), in CI and in the user install the
-  README documents.
+  README and `docs/USAGE.md` document.
 - R8.3 CI runs pip-audit and bandit on `src/`; GitHub Actions pinned by SHA; workflow permissions read-only.
 - R8.4 The sandbox base image is pinned by digest [phase 4].
 

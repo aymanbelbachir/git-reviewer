@@ -344,7 +344,7 @@ Design rules:
 - Built from `sandbox/Dockerfile`: base `python:3.12-slim` pinned by its multi-platform index
   digest, pytest and ruff installed from `sandbox/requirements.txt` with `--require-hashes` and
   wheels only, user `10001:10001`. The user builds it once (`docker build -t git-reviewer-sandbox:0.1
-  sandbox/`, see the README); CI builds it the same way.
+  sandbox/`, see [USAGE.md](USAGE.md)); CI builds it the same way.
 - A `.pth` file in the image's site-packages appends `/work/src` and `/work` to `sys.path`, after the
   standard library and the installed packages, and the runner uses `python -P` (no current
   directory in front). So the reviewed code is importable, but a `pytest.py`, `pluggy.py` or
@@ -356,7 +356,7 @@ Design rules:
   change in the middle of a review. Anyone who could re-tag images already controls Docker, which is
   root-equivalent on the machine.
 - **Dependencies of the reviewed project are never installed from the reviewed ref.** Installing them
-  would run build code from the attacker with network access. The README documents how to build a
+  would run build code from the attacker with network access. [USAGE.md](USAGE.md) documents how to build a
   derived image from a requirements file the user exports from a ref they trust (default: the base
   branch), wheels only and hashes required, so no `setup.py` runs during the build.
 - Trade-off: if the reviewed diff changes dependencies, the tests run with the trusted set and may
@@ -726,7 +726,7 @@ exec '/absolute/path/to/git-reviewer' review --hook --mode block
     `trust_env=False`; `ollama.ResponseError` is caught around model calls). Both already come with
     `langchain-ollama`: listing them adds no package, only the versions we test against.
 - `uv.lock` committed (it records hashes); installs use `uv sync --locked`. Users install from a
-  dedicated clone with `uv sync --locked --no-dev --no-editable` (README "Installing"), not with
+  dedicated clone with `uv sync --locked --no-dev --no-editable` (USAGE.md "Installing"), not with
   `uv tool install`, which ignores `uv.lock`.
 - CI (GitHub Actions, added in phase 2): actions pinned by commit SHA, `permissions: contents: read`,
   `uv sync --locked`, ruff, pytest (unit + security, Docker available on the Linux runner), bandit on
