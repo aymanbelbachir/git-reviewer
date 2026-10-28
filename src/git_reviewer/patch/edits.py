@@ -80,11 +80,14 @@ def unified_diff(path: str, original: str, patched: str) -> str:
 
 
 def added_lines(original: str, patched: str) -> list[tuple[int, str]]:
-    """(line number in the patched file, text) of every line the patch adds or changes."""
-    old, new = split_lines(original), split_lines(patched)
+    """(line number in the patched file, text) of every line whose content the patch adds or
+    changes. Lines are compared without their "\\n": a last line that only gains one (as
+    `apply_edits` gives it) is unchanged."""
+    old = [line.removesuffix("\n") for line in split_lines(original)]
+    new = [line.removesuffix("\n") for line in split_lines(patched)]
     matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
     found: list[tuple[int, str]] = []
     for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
         if tag in {"replace", "insert"}:
-            found.extend((number + 1, new[number].rstrip("\n")) for number in range(j1, j2))
+            found.extend((number + 1, new[number]) for number in range(j1, j2))
     return found

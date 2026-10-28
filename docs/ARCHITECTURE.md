@@ -303,12 +303,16 @@ Design rules:
 - Everything shown in a terminal goes through `sanitize.for_terminal()`: C0/C1 controls (except
   newline and tab) and ANSI/OSC sequences are removed, bidi and invisible characters are shown as
   `U+202E`-style escapes, length is capped. Rich markup in untrusted text is escaped (T-06).
+- Multi-line untrusted text whose lines matter (the proposed patch's diff) is split on `\n` only,
+  like git: `str.splitlines` would also break on U+2028, `\x1c` or a form feed taken from the
+  reviewed file and show an extra line that is not in the diff. Line numbers compared with the
+  scanners' are counted as Python counts them: a lone `\r` also ends a line there (§11).
 
 ## 7. Subprocess policy (`proc.run`)
 - `shell=False` always; argv is a `list[str]`; `stdin=DEVNULL` unless data is passed explicitly.
 - Allowlisted binaries: `git`, `docker`, `gitleaks`, `lsof` (only for the Ollama listener check, §9,
   with a fixed argv), plus `ruff` and `bandit` from our own virtualenv.
-  They are resolved once at startup to absolute paths, from a fixed list of directories; relative
+  They are resolved to absolute paths before every call, from a fixed list of directories; relative
   PATH entries are rejected and a binary located inside the reviewed repository is refused (T-22).
 - Environment: built from scratch (fixed `PATH`, `LANG=C.UTF-8`, the git variables of §6.1). The
   user's environment is never inherited; the only pass-throughs are the hook-mode git variables of
@@ -398,7 +402,8 @@ docker --host unix://<validated socket> run
 - The Docker endpoint is resolved once by `sandbox.endpoint`: `DOCKER_HOST`, else the current
   context (`DOCKER_CONTEXT`, or `currentContext` in the Docker config file, nothing else of which is
   read), else `/var/run/docker.sock`. It must be a `unix://` socket owned by root or the user, in a
-  directory others cannot write; `tcp://` and `ssh://` exit 2, because the code would leave the
+  directory others cannot write (or a sticky one, such as `/tmp`, where they cannot replace the
+  socket); `tcp://` and `ssh://` exit 2, because the code would leave the
   machine (T-17). Every docker call then gets `--host unix://<resolved socket>` and `DOCKER_CONFIG`
   pointing at the empty private dir, so the endpoint used is the endpoint validated.
 - If Docker is missing, not running, or the image is not built, `--run-tests` exits 4 before the
@@ -444,8 +449,9 @@ docker --host unix://<validated socket> run
 ## 10. Guardians
 
 ### 10.0 Common runner
-- Output schema (strict): `{verdict: "ok" | "suspect" | "block", reasons: [str ≤ 300 chars, ≤ 10],
-  lines: [{file, line} ≤ 50]}`.
+- Output schema (strict): `{verdict: "ok" | "suspect" | "block", reasons: [str ≤ 1,000 chars, ≤ 10],
+  lines: [{file, line} ≤ 50]}`. Each reason is cut to 300 characters before display; the schema
+  bound is looser so that a wordy but valid answer is not a failure, which would block.
 - `run_guardian()` wraps every call: exception, timeout, invalid JSON or schema violation → `block`
   with a reason code (fail-closed).
 - Isolation: own system prompt, no tools, no reviewer history; it receives only its input bundle.
@@ -462,6 +468,11 @@ Before the review:
   - other invisible or format characters (zero-width, joiners, variation selectors, Hangul fillers)
     → suspect: they also occur legitimately, e.g. in emoji sequences. A BOM at the start of a file
     is accepted;
+  - every other C0/C1 control character but a tab (form feed, vertical tab, ESC, `\x1c`–`\x1f`,
+    NEL...; a carriage return is checked on its own) and the Unicode line and paragraph
+    separators (U+2028/2029) → suspect: some programs show a line break there that git and the
+    model do not see, or act on them as terminal controls. A line holding only form feeds (before
+    the `\r` of a CRLF file) is a page break, which PEP 8 allows, and is not flagged;
   - base64 (≥ 40 chars) or hex (≥ 64 chars) runs that **decode to readable text** → suspect, and the
     decoded text is scanned for AI-addressed phrases. Runs that decode to random bytes (hashes,
     integrity values in lockfiles) carry no message and are ignored, to avoid flooding alerts;
@@ -528,7 +539,9 @@ After the sandbox runs (also when a run failed):
   current worktree, and `config`, `hooks/` and `info/` of the common git directory (a different
   directory in a linked worktree). Symlinks are hashed as their target text, never followed; a file
   that cannot be read is an error, never skipped. Nothing is expected to change, since nothing is
-  written to the user's `.git`.
+  written to the user's `.git`. Which untracked files count as ignored depends in part on the
+  `.gitignore` files of the working tree, which the reviewed branch controls when it is checked
+  out (SECURITY.md T-13).
 - No container with the run label exists (`docker ps --all --filter label=…`).
 - Either check failing, or not being possible, is a block (exit 2, even in warn mode), and the
   block keeps the cause (for example "Docker did not answer in time").
@@ -579,7 +592,9 @@ After the sandbox runs (also when a run failed):
    then both versions are parsed from bytes, as Python reads them, and compared: new risky import,
    third-party dependency or star import; new uses, with import aliases resolved, of
    eval/exec/os.system/os._exit/subprocess/socket/HTTP/decoding helpers, including
-   `getattr(os, "system")` and getattr on computed names; long literals; invisible characters;
+   `getattr(os, "system")` and getattr on computed names; long literals; any character the
+   display escapes (control, format, separator, invisible letter such as a Hangul filler) on a
+   line the patch adds or changes, so none can be traded for another or moved onto a new line;
    catch-all `except`, also in a tuple; and in test files any removed or changed assertion or test,
    any new skip/xfail/SkipTest/skipTest, and any new early `return`/`raise` or constant condition
    inside a test; a risky call kept as a fallback in an exception handler; a logging or print call
@@ -597,7 +612,9 @@ After the sandbox runs (also when a run failed):
    afterwards), followed by the fingerprint and leftover-container checks; then, for a scanner
    finding, the same scanner must report that rule fewer times in the patched file (a file the
    scanner cannot parse does not count as fixed); then the auditor. Guardian alerts on the patch
-   ("suspect") are shown next to it and in the security report. Up to 3 rounds. Rejection reasons go back to the author inside nonce delimiters; from
+   ("suspect") are shown next to it and in the security report. Up to 3 rounds. An author answer
+   that fails validation is never repaired: it is a rejected round like any other, and the next
+   round is a fresh answer, validated the same way. Rejection reasons go back to the author inside nonce delimiters; from
    the tests, only pytest's `FAILED`/`ERROR` summary lines, sanitized and truncated, because test
    output is attacker-controlled. A canary leak by the author blocks the review.
 4. The CLI shows the full diff (sanitized, invisible characters made visible), the author's
@@ -701,8 +718,15 @@ exec '/absolute/path/to/git-reviewer' review --hook --mode block
 
 ## 14. Supply chain and CI
 - Runtime dependencies: `typer`, `pydantic`, `langgraph`, `langchain-ollama` (and their transitive
-  deps). Dev: `pytest`, `ruff`, `bandit`, `pip-audit`. Anything else needs a written justification.
-- `uv.lock` committed (it records hashes); installs use `uv sync --locked`.
+  deps). Dev: `pytest`, `pip-audit`. Anything else needs a written justification:
+  - `ruff` and `bandit` are the static analyzers: they run from the tool's own locked environment,
+    never from the reviewed repository (T-08, T-22);
+  - `httpx` and `ollama` are imported directly (the Ollama check builds its own `httpx` client with
+    `trust_env=False`; `ollama.ResponseError` is caught around model calls). Both already come with
+    `langchain-ollama`: listing them adds no package, only the versions we test against.
+- `uv.lock` committed (it records hashes); installs use `uv sync --locked`. Users install from a
+  dedicated clone with `uv sync --locked --no-dev --no-editable` (README "Installing"), not with
+  `uv tool install`, which ignores `uv.lock`.
 - CI (GitHub Actions, added in phase 2): actions pinned by commit SHA, `permissions: contents: read`,
   `uv sync --locked`, ruff, pytest (unit + security, Docker available on the Linux runner), bandit on
   `src/`, pip-audit on the locked environment. gitleaks pinned by version and checksum.

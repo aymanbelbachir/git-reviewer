@@ -4,6 +4,24 @@ A 100% local code reviewer hooked into git: it analyzes your diffs with LangGrap
 
 > Work in progress. The full specification is in [docs/SPEC.md](docs/SPEC.md).
 
+## Installing
+
+git-reviewer needs [uv](https://docs.astral.sh/uv/), git 2.40 or later,
+[gitleaks](https://github.com/gitleaks/gitleaks), [Ollama](https://ollama.com), and Docker for
+`--run-tests`. Install it from a clone of this repository kept outside the repositories you review,
+so that it runs with the exact dependency versions and hashes recorded in `uv.lock`:
+
+```
+git clone <this repository's URL> ~/.local/share/git-reviewer
+cd ~/.local/share/git-reviewer
+uv sync --locked --no-dev --no-editable
+```
+
+The command is then `~/.local/share/git-reviewer/.venv/bin/git-reviewer` (you can link it into
+`~/.local/bin`), and `git-reviewer doctor` checks everything it needs. To upgrade, run `git pull`
+in the clone, then the same `uv sync`. Avoid `uv tool install`: it does not use `uv.lock`, so it
+installs whatever dependency versions are newest, without the recorded hashes.
+
 ## Models
 
 git-reviewer uses two local models through Ollama and never downloads them itself:
@@ -93,6 +111,6 @@ missing Ollama or gitleaks still stops the commit. The hook does not run the san
   pre-commit framework), `install-hook` changes nothing and prints the line to add there.
 
 The hook calls git-reviewer by its absolute path, so install git-reviewer outside the repository
-you review (for example with `uv tool install`). If you move the repository or reinstall
-git-reviewer elsewhere, run `install-hook` again. `git-reviewer doctor` shows whether git really
+you review (see [Installing](#installing)). If you move the repository or reinstall git-reviewer
+elsewhere, run `install-hook` again. `git-reviewer doctor` shows whether git really
 runs the hook.

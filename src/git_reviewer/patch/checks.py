@@ -35,10 +35,11 @@ import itertools
 import re
 import stat
 import sys
-import unicodedata
 from collections import Counter
 
+from git_reviewer import sanitize
 from git_reviewer.guardians.execution import is_test_infrastructure
+from git_reviewer.patch.edits import added_lines
 from git_reviewer.static.analyze import declared_coding_is_safe
 
 _RISKY_MODULES = frozenset(
@@ -298,7 +299,11 @@ def _obfuscation_problems(
     found: list[str] = []
     if _long_literals(after) - _long_literals(before):
         found.append(f"adds a string literal longer than {_MAX_LITERAL} characters")
-    if _hidden_characters(patched) > _hidden_characters(original):
+    # Any character the display escapes, on any line the patch adds or changes: comparing counts
+    # would let a patch trade a removed form feed for a carriage return, or move a bidi control
+    # from an untouched line onto a new one.
+    changed = (text for _number, text in added_lines(original, patched))
+    if any(sanitize.is_hidden(char) for text in changed for char in text):
         found.append("adds invisible or control characters")
     return found
 
@@ -311,14 +316,6 @@ def _long_literals(tree: ast.Module) -> set[str | bytes]:
         and isinstance(node.value, str | bytes)
         and len(node.value) > _MAX_LITERAL
     }
-
-
-def _hidden_characters(text: str) -> int:
-    return sum(
-        1
-        for char in text
-        if char not in "\n\t" and unicodedata.category(char) in {"Cc", "Cf", "Co", "Cs", "Zl", "Zp"}
-    )
 
 
 def _broad_handlers(tree: ast.Module) -> int:

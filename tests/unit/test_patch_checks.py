@@ -72,6 +72,34 @@ def test_risky_additions_are_refused(addition: str, message: str) -> None:
     assert any(message in problem for problem in found), found
 
 
+@pytest.mark.parametrize(
+    ("removed", "added"),
+    [
+        ("\f", "\r"),  # a lone CR ends a line for Python and the scanners, not for git
+        (chr(0x200D), chr(0x202E)),  # an emoji joiner traded for a bidi override
+        (chr(0x202E), chr(0x202E)),  # a bidi override moved from an untouched line
+    ],
+)
+def test_a_hidden_character_cannot_be_traded_or_moved(removed: str, added: str) -> None:
+    original = APP + f"# page{removed}\n"
+    patched = APP + f"# page\n# note{added}x = 1\n"
+    assert "adds invisible or control characters" in problems("app.py", original, patched)
+
+
+@pytest.mark.parametrize("code", [0x3164, 0x115F, 0xFE0F, 0x034F, 0x2800])
+def test_invisible_letters_and_marks_are_refused(code: int) -> None:
+    # Hangul fillers are letters to Python: `if is_admin or <U+3164>:` reads as a blank.
+    patched = APP + f"FLAG = 'on{chr(code)}'\n"
+    assert "adds invisible or control characters" in problems("app.py", APP, patched)
+
+
+def test_a_changed_line_keeps_no_hidden_character_from_before() -> None:
+    # Fail safe: even a hidden character the line already had refuses the patch.
+    original = APP + f"LABEL = 'a{chr(0x200D)}b'\n"
+    patched = original.replace("LABEL = ", "LABEL: str = ")
+    assert "adds invisible or control characters" in problems("app.py", original, patched)
+
+
 def test_existing_risky_code_is_not_held_against_the_patch() -> None:
     original = APP + "import socket\nx = eval('1')\n"
     fixed = original.replace('["ls", name]', '["ls", "--", name]')

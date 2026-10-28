@@ -16,6 +16,8 @@ from typing import Any
 
 import httpx
 import pytest
+from langchain_core.messages import AIMessage
+from langchain_ollama import ChatOllama
 
 import git_reviewer
 from git_reviewer import proc
@@ -29,6 +31,7 @@ from git_reviewer.llm.ollama import (
     check_model,
     validate_url,
 )
+from git_reviewer.llm.structured import ollama_chat
 from tests.helpers import git, write_files
 
 LIMITS = DiffLimits(max_bytes=1024 * 1024, max_files=200, max_line_chars=10_000)
@@ -162,6 +165,33 @@ def test_proxy_variables_are_ignored(monkeypatch: pytest.MonkeyPatch) -> None:
     with client:
         assert client.trust_env is False
         assert client.follow_redirects is False
+
+
+def test_the_client_that_sends_the_code_ignores_proxies_and_redirects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The reviewer and guardian calls carry the code: their HTTP clients (sync and async) must
+    # talk to the validated endpoint only, whatever the environment says.
+    for name in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY"):
+        monkeypatch.setenv(name, "http://proxy.evil.example:8080")
+    monkeypatch.setenv("OLLAMA_HOST", "http://evil.example:11434")
+    models: list[ChatOllama] = []
+
+    def invoke(self: ChatOllama, messages: object) -> AIMessage:
+        models.append(self)
+        meta = {"done_reason": "stop", "prompt_eval_count": 10}
+        return AIMessage(content="{}", response_metadata=meta)
+
+    monkeypatch.setattr(ChatOllama, "invoke", invoke)
+    endpoint = validate_url("http://127.0.0.1:11434")
+    ollama_chat(endpoint, "m", timeout=5, num_ctx=16_384)("system", "user", {"type": "object"})
+    [model] = models
+    for wrapper in (model._client, model._async_client):  # pyright: ignore[reportPrivateUsage]
+        client = wrapper._client  # pyright: ignore[reportPrivateUsage]
+        assert client.trust_env is False
+        assert client.follow_redirects is False
+        assert str(client.base_url).rstrip("/") == endpoint.base_url
+        assert not client._mounts  # pyright: ignore[reportPrivateUsage] # no proxy transport
 
 
 @pytest.mark.parametrize(

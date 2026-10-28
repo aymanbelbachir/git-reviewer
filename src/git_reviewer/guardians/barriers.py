@@ -4,6 +4,10 @@ Scans every line shown to the model (added, unchanged and removed) and every fil
 - bidirectional controls (Trojan Source) and Unicode tag characters (hidden ASCII) -> block;
 - other invisible or format characters (zero-width, joiners, variation selectors) -> suspect, as
   they also occur legitimately (emoji sequences);
+- every other control character but a tab (form feed, ESC, \\x1c, NEL...) and the Unicode line and
+  paragraph separators, which some programs show as a line break where git sees none, or act on
+  as terminal controls -> suspect. A line holding only form feeds is a page break (PEP 8 allows
+  it) and is not flagged;
 - base64 or hex runs that decode to readable text -> suspect, and the decoded text is scanned too.
   Runs that decode to random bytes (hashes, keys in lockfiles) carry no message and are ignored;
 - phrases addressed to an AI, after NFKC normalization, casefolding and removal of invisible
@@ -38,6 +42,10 @@ _OTHER_INVISIBLE = (
     range(0xFFA0, 0xFFA1),
 )
 _BOM = 0xFEFF
+# Control characters and Unicode line or paragraph separators. A tab is ordinary; a carriage
+# return is checked on its own in `scan` (file names with control characters never get here:
+# git.diff refuses them).
+_CONTROLS = frozenset({"Cc", "Zl", "Zp"})
 _BASE64_RUN = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 _HEX_RUN = re.compile(r"\b[0-9a-fA-F]{64,}\b")
 _MIN_DECODED_CHARS = 16
@@ -133,16 +141,23 @@ def addresses_an_ai(text: str) -> bool:
 
 
 def _scan_text(result: BarrierResult, line: PatchLine, text: str, *, where: str) -> None:
+    # A line holding only form feeds and blanks is a page break, which PEP 8 allows (in a CRLF
+    # file, before its "\r"; a carriage return inside a line still blocks in `scan`).
+    page_break = where == "line" and not text.removesuffix("\r").strip(" \t\f")
     for index, char in enumerate(text):
         code = ord(char)
+        category = unicodedata.category(char)
         if code in _BIDI:
             result.flag(line, "block", f"bidirectional control character U+{code:04X} in a {where}")
         elif code in _TAGS:
             result.flag(line, "block", f"invisible Unicode tag character in a {where}")
         elif code == _BOM and index == 0 and line.line == 1:
             continue
-        elif unicodedata.category(char) == "Cf" or any(code in r for r in _OTHER_INVISIBLE):
+        elif category == "Cf" or any(code in r for r in _OTHER_INVISIBLE):
             result.flag(line, "suspect", f"invisible character U+{code:04X} in a {where}")
+        elif category in _CONTROLS and char not in "\t\r" and not page_break:
+            reason = f"control or line separator character U+{code:04X} in a {where}"
+            result.flag(line, "suspect", reason)
     if addresses_an_ai(text):
         result.flag(line, "suspect", f"text addressed to an AI in a {where}")
     if _DELIMITER.search(text):

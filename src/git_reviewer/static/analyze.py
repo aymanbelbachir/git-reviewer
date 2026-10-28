@@ -15,7 +15,6 @@ checks make sure nothing escapes the scanners silently:
 
 from __future__ import annotations
 
-import difflib
 import re
 from collections import Counter
 from dataclasses import dataclass
@@ -26,6 +25,7 @@ from git_reviewer.git.diff import patch_lines
 from git_reviewer.git.snapshot import Snapshot, reviewed_files, single_file
 from git_reviewer.guardians.base import decision
 from git_reviewer.models import SEVERITY_RANK, Decision, Diff, LineRef, Severity, StaticFinding
+from git_reviewer.patch.edits import added_lines
 from git_reviewer.static.tools import StaticAnalysisError, run_bandit, run_gitleaks, run_ruff
 
 _PYTHON_SUFFIXES = (".py", ".pyi", ".pyw")
@@ -57,6 +57,8 @@ _SCANNER_CONFIG_FILES = frozenset(
 _SCANNER_CONFIG_SECTION = re.compile(r"^\s*\[tool\.(ruff|bandit)\b")
 # Hardcoded passwords: rated low by bandit, never acceptable in a patch.
 _ALWAYS_SERIOUS = frozenset({"B105", "B106", "B107"})
+# Where Python ends a line: "\n", "\r\n", or a lone "\r".
+_PYTHON_LINE_ENDS = re.compile(r"\r\n?")
 
 
 @dataclass(frozen=True)
@@ -145,7 +147,11 @@ def added_findings(path: str, original: str, patched: str, repo: Path) -> list[s
     adds or changes (also when it only moved there, as into a new helper function), or more
     serious findings of one rule than before. An original the scanners cannot parse counts as
     having none."""
-    added = _added_lines(original, patched)
+    # Line numbers as Python and the scanners count them: a lone "\r" ends a line, a U+2028 or a
+    # form feed does not (`str.splitlines` would split there too). Any other count would shift the
+    # numbers, and a finding on a changed line would go unnoticed.
+    old, new = _PYTHON_LINE_ENDS.sub("\n", original), _PYTHON_LINE_ENDS.sub("\n", patched)
+    added = {number for number, _text in added_lines(old, new)}
     after = serious_findings(path, patched, repo)
     try:
         before = Counter((f.tool, f.rule) for f in serious_findings(path, original, repo))
@@ -165,18 +171,6 @@ def added_findings(path: str, original: str, patched: str, repo: Path) -> list[s
 
 def _span_touches(span: tuple[int, int] | None, lines: set[int]) -> bool:
     return span is not None and any(span[0] <= number <= span[1] for number in lines)
-
-
-def _added_lines(original: str, patched: str) -> set[int]:
-    """Line numbers, in the patched file, of the lines the patch adds or changes."""
-    old, new = original.splitlines(), patched.splitlines()
-    matcher = difflib.SequenceMatcher(a=old, b=new, autojunk=False)
-    return {
-        number + 1
-        for tag, _i1, _i2, j1, j2 in matcher.get_opcodes()
-        if tag in {"replace", "insert"}
-        for number in range(j1, j2)
-    }
 
 
 def suppression_findings(diff: Diff) -> list[StaticFinding]:

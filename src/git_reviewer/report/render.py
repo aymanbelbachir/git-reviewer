@@ -163,10 +163,14 @@ def _proposal_lines(fix: FixProposal) -> list[str]:
     if fix.tests is not None:
         lines.append(f"  tests with the patch: {fix.tests.outcome} ({fix.tests.seconds:.1f}s)")
     lines.extend(f"  [ALERT] {sanitize.one_line(alert)}" for alert in fix.alerts)
-    # Every line shown, invisible and control characters made visible.
-    lines.extend(
-        f"  | {sanitize.one_line(line, max_chars=20_000)}" for line in fix.diff.splitlines()
-    )
+    # Every line shown, invisible and control characters made visible. Split on "\n" only, like
+    # git: `str.splitlines` would also split on characters such as U+2028 or \x1c taken from the
+    # reviewed file, and show them as extra diff lines the patch does not contain (T-06). The
+    # "\r" ending each line of a CRLF file is part of its line break, not shown; a carriage
+    # return anywhere else is.
+    for line in fix.diff.removesuffix("\n").split("\n"):
+        shown = sanitize.one_line(line.removesuffix("\r"), max_chars=20_000)
+        lines.append(f"  | {shown}")
     return lines
 
 

@@ -7,7 +7,8 @@ DOCKER_CONFIG:
   the Docker config file, whose other content is never read); otherwise /var/run/docker.sock;
 - it must be `unix://`: tcp:// or ssh:// would send the code to another machine;
 - the socket must exist, belong to root or the current user, and sit in a directory other users
-  cannot write, or someone could put a fake daemon there and receive the code.
+  cannot write, or a sticky one (such as /tmp) where they cannot replace it; otherwise someone
+  could put a fake daemon there and receive the code.
 """
 
 from __future__ import annotations

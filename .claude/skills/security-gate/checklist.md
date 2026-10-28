@@ -102,7 +102,8 @@ SECURITY.md; section numbers to docs/ARCHITECTURE.md. The phase in brackets is w
 
 ## R8. Supply chain [phase 2]
 - R8.1 `uv.lock` is committed; runtime dependencies are minimal (list them, flag anything unexpected).
-- R8.2 Installs use `--locked` (hashes come from `uv.lock`).
+- R8.2 Installs use `--locked` (hashes come from `uv.lock`), in CI and in the user install the
+  README documents.
 - R8.3 CI runs pip-audit and bandit on `src/`; GitHub Actions pinned by SHA; workflow permissions read-only.
 - R8.4 The sandbox base image is pinned by digest [phase 4].
 
@@ -130,7 +131,8 @@ SECURITY.md; section numbers to docs/ARCHITECTURE.md. The phase in brackets is w
 
 ## G1. Anti-injection guardian [phase 3]
 - G1.1 Barrier: bidi and Unicode tag characters and a carriage return inside a line block;
-  other invisible characters and words mixing letters of different scripts are suspect.
+  other invisible characters, other control characters (not a tab), Unicode line or paragraph
+  separators and words mixing letters of different scripts are suspect.
 - G1.2 Barrier: long base64/hex strings that decode to readable text flagged, decoded text re-scanned.
 - G1.3 Barrier: AI-addressed phrases detected after normalization, English and French at least,
   including instructions split across lines and imitations of the data delimiters.

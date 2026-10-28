@@ -50,6 +50,22 @@ def test_a_good_patch_is_validated_audited_and_proposed(repo: Path) -> None:
     assert report.status == "reviewed"
 
 
+@pytest.mark.parametrize(
+    "answer",
+    ["not json", json.dumps({"edits": [], "explanation": "x", "extra": 1})],
+)
+def test_an_invalid_author_answer_is_a_rejected_attempt_never_repaired(
+    repo: Path, answer: str
+) -> None:
+    llm = FakeLLM(patch=answer)
+    report = fix(repo, llm)
+    assert len(llm.patch_calls) == 3  # each attempt is a fresh answer, and there are three
+    assert report.fix is None
+    assert [a.accepted for a in report.fix_attempts] == [False, False, False]
+    reasons = [reason for attempt in report.fix_attempts for reason in attempt.reasons]
+    assert all(r.startswith("the patch author's answer was rejected") for r in reasons)
+
+
 def test_the_auditor_sees_only_the_finding_and_the_patch(repo: Path) -> None:
     llm = FakeLLM(patch=GOOD)
     fix(repo, llm)

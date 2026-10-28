@@ -1,10 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
 
-from git_reviewer.models import Decision, ReviewFinding, SandboxRun, StaticFinding
+from git_reviewer.models import (
+    Decision,
+    FixProposal,
+    FixTarget,
+    ReviewFinding,
+    SandboxRun,
+    StaticFinding,
+)
+from git_reviewer.patch.edits import unified_diff
 from git_reviewer.report import render
 from git_reviewer.report.model import Report, exit_code
 
@@ -74,6 +83,40 @@ def test_model_text_is_sanitized_in_the_terminal() -> None:
     text = render.to_text(make(review_findings=(finding,), decisions=(decision,)))
     assert ESC not in text and chr(0x202E) not in text
     assert "<U+001B>" in text and "<U+202E>" in text
+
+
+def preview(original: str) -> list[str]:
+    """The terminal lines of a report proposing to change `return 1` into `return 2`."""
+    patched = original.replace("return 1", "return 2")
+    target = FixTarget(
+        source="reviewer", rule="bug", file="a.py", line=3, severity="high", message="m"
+    )
+    fix = FixProposal(
+        target=target,
+        file="a.py",
+        explanation="return 2",
+        diff=unified_diff("a.py", original, patched),
+        patched=patched,
+        original_sha256=hashlib.sha256(original.encode()).hexdigest(),
+    )
+    return render.to_text(make(fix_requested=True, fix=fix)).split("\n")
+
+
+@pytest.mark.parametrize("separator", ["\x1c", "\x0b", "\x0c", "\x85", "\u2028", "\u2029"])
+def test_patch_preview_cannot_be_forged_with_line_separators(separator: str) -> None:
+    # The original file comes from the reviewed branch: a separator in a comment must not show
+    # up as a fake removed line in the diff the user approves (T-06).
+    shown = preview(f"def run(cmd):\n    # note{separator}-    os.system(cmd)\n    return 1\n")
+    assert "  | -    os.system(cmd)" not in shown
+    marker = f"<U+{ord(separator):04X}>"
+    assert f"  |      # note{marker}-    os.system(cmd)" in shown
+    assert "  | -    return 1" in shown and "  | +    return 2" in shown
+
+
+def test_patch_preview_of_a_crlf_file_hides_only_the_line_ending_cr() -> None:
+    shown = preview("def run(cmd):\r\n    x = 1  # a\rb\r\n    return 1\r\n")
+    assert "  | -    return 1" in shown and "  | +    return 2" in shown
+    assert "  |      x = 1  # a<U+000D>b" in shown
 
 
 def test_json_is_ascii_and_complete() -> None:

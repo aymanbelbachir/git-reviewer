@@ -28,17 +28,19 @@ _INVISIBLE_RANGES = (
 _TRUNCATION_MARK = " [truncated]"
 
 
+def is_hidden(char: str) -> bool:
+    """Whether `char` is shown as a `<U+XXXX>` escape: control, format, separator, unassigned or
+    invisible, newline and tab excepted."""
+    if char in _KEPT_CONTROLS:
+        return False
+    return unicodedata.category(char) in _ESCAPED_CATEGORIES or _is_invisible(ord(char))
+
+
 def for_terminal(text: str, *, max_chars: int = 4000) -> str:
     """Return `text` with every control, format and tag character made visible, length-capped."""
     out: list[str] = []
     for char in text:
-        code = ord(char)
-        if char in _KEPT_CONTROLS:
-            out.append(char)
-        elif unicodedata.category(char) in _ESCAPED_CATEGORIES or _is_invisible(code):
-            out.append(f"<U+{code:04X}>")
-        else:
-            out.append(char)
+        out.append(f"<U+{ord(char):04X}>" if is_hidden(char) else char)
     cleaned = "".join(out)
     if len(cleaned) > max_chars:
         return cleaned[:max_chars] + _TRUNCATION_MARK

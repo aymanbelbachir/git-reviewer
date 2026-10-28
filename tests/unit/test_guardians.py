@@ -65,6 +65,16 @@ def test_guardian_fails_closed(answer: object) -> None:
     assert found.verdict == "block"
 
 
+@pytest.mark.parametrize(("length", "verdict"), [(800, "suspect"), (1_001, "block")])
+def test_a_wordy_reason_is_cut_for_display_and_only_an_oversized_one_fails(
+    length: int, verdict: str
+) -> None:
+    found = run_guardian("g", FakeLLM(guardian=guardian_json("suspect", ["x" * length])), "s", "u")
+    assert found.verdict == verdict
+    if verdict == "suspect":
+        assert found.reasons == ("x" * 300,)
+
+
 def test_guardian_lines_outside_what_it_was_shown_are_dropped() -> None:
     answer = guardian_json(
         "suspect", ["looks odd"], [{"file": "a.py", "line": 2}, {"file": "b.py", "line": 9}]

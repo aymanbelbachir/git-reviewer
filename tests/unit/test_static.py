@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 
@@ -195,6 +196,35 @@ def test_empty_scanner_output_fails_closed(
         run_static_analysis(repo, collect_staged(repo, LIMITS))
 
 
+def test_a_file_bandit_silently_skips_fails_closed(
+    make_repo: Callable[..., Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `--exclude=` already stops bandit's default excludes; this proves the second line of
+    # defense: a file missing from bandit's report is a failure, not "no findings" (T-08).
+    from git_reviewer import proc
+    from git_reviewer.static import tools
+    from git_reviewer.static.tools import StaticAnalysisError
+
+    real_run = proc.run
+
+    def skipping(program: str, *args: object, **kwargs: object) -> proc.Result:
+        result = real_run(program, *args, **kwargs)  # type: ignore[arg-type]
+        if program != "bandit":
+            return result
+        report = json.loads(result.stdout)
+        report["metrics"] = {k: v for k, v in report["metrics"].items() if not k.endswith("b.py")}
+        return proc.Result(
+            returncode=result.returncode, stdout=json.dumps(report).encode(), stderr=b""
+        )
+
+    repo = make_repo()
+    write_files(repo, {"a.py": "x = 1\n", "b.py": "y = 2\n"})
+    git(repo, "add", "-A")
+    monkeypatch.setattr(tools.proc, "run", skipping)
+    with pytest.raises(StaticAnalysisError, match="silently skipped 1 file"):
+        run_static_analysis(repo, collect_staged(repo, LIMITS))
+
+
 def test_scanner_line_beyond_gits_last_line_blocks(make_repo: Callable[..., Path]) -> None:
     repo = make_repo()
     write_files(repo, {"a.py": "x = 1  # note\rimport os\n"})
@@ -240,6 +270,30 @@ def test_a_risky_call_moved_into_a_new_helper_is_refused(tmp_path: Path) -> None
         "    except ValueError:\n        return _legacy(value)\n"
     )
     assert any("B307" in reason for reason in added_findings("app.py", before, after, tmp_path))
+
+
+@pytest.mark.parametrize(("separator", "line"), [("\u2028", 3), ("\x0c", 3), ("\r", 4)])
+def test_touched_lines_are_counted_as_python_counts_them(
+    tmp_path: Path, separator: str, line: int
+) -> None:
+    # Python and bandit end a line at a lone "\r", not at U+2028 or a form feed. Any other
+    # count would put the changed eval call on another line and miss bandit's finding.
+    from git_reviewer.static.analyze import added_findings
+
+    before = f"# note{separator}more\ndef parse(value):\n    return eval(value)\n"
+    after = before.replace("eval(value)", "eval(value.strip())")
+    assert added_findings("app.py", before, after, tmp_path) == [
+        f"adds a bandit finding (B307) on line {line}"
+    ]
+
+
+def test_an_old_finding_on_a_last_line_without_newline_is_not_added(tmp_path: Path) -> None:
+    # apply_edits gives the last line its missing "\n"; its code does not change.
+    from git_reviewer.static.analyze import added_findings
+
+    before = "def parse(value):\n    value = value.strip()\n    return eval(value)"
+    after = before.replace("value.strip()", "value.strip().lower()") + "\n"
+    assert added_findings("app.py", before, after, tmp_path) == []
 
 
 def test_a_hardcoded_password_is_refused_although_bandit_rates_it_low(tmp_path: Path) -> None:

@@ -22,16 +22,50 @@ FORBIDDEN_CALLS = {
     ("os", "remove"),
     ("os", "unlink"),
     ("os", "rename"),
+    ("os", "renames"),
     ("os", "replace"),
     ("os", "chmod"),
+    ("os", "fchmod"),
+    ("os", "lchmod"),
     ("os", "symlink"),
+    ("os", "link"),
+    ("os", "truncate"),
     ("os", "mkdir"),
     ("os", "makedirs"),
+    ("os", "rmdir"),
+    ("os", "removedirs"),
+    ("os", "mkfifo"),
     ("shutil", "rmtree"),
     ("shutil", "copytree"),
+    ("shutil", "copy"),
+    ("shutil", "copy2"),
+    ("shutil", "copyfile"),
+    ("shutil", "copyfileobj"),
+    ("shutil", "copymode"),
+    ("shutil", "copystat"),
     ("shutil", "move"),
+    ("os", "utime"),
+    ("os", "mknod"),
+    ("tempfile", "mkstemp"),
+    ("tempfile", "mkdtemp"),
+    ("tempfile", "NamedTemporaryFile"),
+    ("tempfile", "TemporaryFile"),
+    ("tempfile", "SpooledTemporaryFile"),
+    ("tempfile", "TemporaryDirectory"),
 }
-FORBIDDEN_METHODS = {"write_text", "write_bytes", "unlink", "rmdir", "mkdir", "symlink_to", "chmod"}
+FORBIDDEN_METHODS = {
+    "write_text",
+    "write_bytes",
+    "unlink",
+    "rmdir",
+    "mkdir",
+    "symlink_to",
+    "hardlink_to",
+    "chmod",
+    "lchmod",
+    "rename",
+    "touch",
+}
 
 
 def modules() -> list[Path]:
@@ -71,17 +105,37 @@ def test_file_writes_only_in_effect_modules(path: Path) -> None:
         return
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if isinstance(func, ast.Attribute):
-            if isinstance(func.value, ast.Name):
-                assert (func.value.id, func.attr) not in FORBIDDEN_CALLS, (
-                    f"{relative(path)} calls {func.value.id}.{func.attr}"
-                )
-            assert func.attr not in FORBIDDEN_METHODS, f"{relative(path)} calls .{func.attr}()"
-        if _is_open_for_writing(node):
-            pytest.fail(f"{relative(path)} opens a file for writing")
+        if (problem := _write_problem(node)) is not None:
+            pytest.fail(f"{relative(path)} {problem}")
+
+
+_WRITING_MODULES = {"os", "shutil", "tempfile"}
+
+
+def _write_problem(node: ast.AST) -> str | None:
+    """How `node` could write a file outside the effect modules, or None."""
+    if isinstance(node, ast.Import):
+        # An alias (`import os as o`) would hide every call below from this check.
+        aliased = [a.name for a in node.names if a.name in _WRITING_MODULES and a.asname]
+        return f"imports {aliased[0]} under another name" if aliased else None
+    if isinstance(node, ast.ImportFrom) and node.module in _WRITING_MODULES:
+        names = [a.name for a in node.names if (node.module, a.name) in FORBIDDEN_CALLS]
+        return f"imports {node.module}.{names[0]}" if names else None
+    if not isinstance(node, ast.Call):
+        return None
+    func = node.func
+    if isinstance(func, ast.Attribute):
+        if isinstance(func.value, ast.Name) and (func.value.id, func.attr) in FORBIDDEN_CALLS:
+            return f"calls {func.value.id}.{func.attr}"
+        if func.attr in FORBIDDEN_METHODS:
+            return f"calls .{func.attr}()"
+        # Path.replace(target) takes one argument; str.replace(old, new) takes two or more.
+        arguments = len(node.args) + sum(1 for kw in node.keywords if kw.arg == "target")
+        if func.attr == "replace" and arguments == 1 and len(node.keywords) <= 1:
+            return "calls .replace(target)"
+    if _is_open_for_writing(node):
+        return "opens a file for writing"
+    return None
 
 
 def _is_open_for_writing(node: ast.Call) -> bool:
@@ -143,7 +197,83 @@ def test_write_detection(source: str, writes: bool) -> None:
     assert _is_open_for_writing(call) is writes
 
 
-_FORBIDDEN_GIT_COMMANDS = {"add", "commit", "push", "update-index", "update-ref", "reset", "stash"}
+@pytest.mark.parametrize(
+    ("source", "writes"),
+    [
+        ("temporary.replace(target)", True),
+        ("temporary.replace(target=dest)", True),
+        ("text.replace('a', 'b')", False),
+        ("when.replace(year=2000)", False),
+        ("chained.rename(target)", True),
+        ("Path(p).touch()", True),
+        ("Path(p).hardlink_to(q)", True),
+        ("os.link(a, b)", True),
+        ("shutil.copy(a, b)", True),
+        ("tempfile.mkdtemp()", True),
+        ("from tempfile import NamedTemporaryFile", True),
+        ("tempfile.gettempdir()", False),
+        ("os.utime(p)", True),
+        ("from os import replace", True),
+        ("from os import path", False),
+        ("import shutil as sh", True),
+        ("import os", False),
+    ],
+)
+def test_write_detection_of_moves_links_and_imports(source: str, writes: bool) -> None:
+    node = ast.parse(source).body[0]
+    target = node.value if isinstance(node, ast.Expr) else node
+    assert (_write_problem(target) is not None) is writes
+
+
+# Commands that change the index, HEAD, the branches or the remote. Not "rm": the same list
+# check would flag `docker rm`, and the sandbox runner needs it.
+_FORBIDDEN_GIT_COMMANDS = {
+    "add",
+    "am",
+    "apply",
+    "checkout",
+    "cherry-pick",
+    "commit",
+    "commit-tree",
+    "merge",
+    "mv",
+    "push",
+    "rebase",
+    "reset",
+    "restore",
+    "revert",
+    "stash",
+    "switch",
+    "update-index",
+    "update-ref",
+}
+# Global options of git that take the next element as their value.
+_GIT_OPTIONS_WITH_VALUE = {"-c", "-C", "--attr-source", "--git-dir", "--work-tree", "--namespace"}
+
+
+def _git_subcommand(node: ast.List | ast.Tuple) -> str | None:
+    """The first element after git's global options (`-c name=value`, `--literal-pathspecs`...),
+    when it is written in the code."""
+    elements = iter(node.elts)
+    for element in elements:
+        if isinstance(element, ast.Starred) or _is_formatted_option(element):
+            continue  # a spread of options, such as HARDENING_CONFIG, or f"--work-tree={tree}"
+        if not isinstance(element, ast.Constant) or not isinstance(element.value, str):
+            return None
+        if element.value == "--":
+            return None
+        if element.value in _GIT_OPTIONS_WITH_VALUE:
+            next(elements, None)
+        elif not element.value.startswith("-"):
+            return element.value
+    return None
+
+
+def _is_formatted_option(element: ast.expr) -> bool:
+    if not isinstance(element, ast.JoinedStr) or not element.values:
+        return False
+    start = element.values[0]
+    return isinstance(start, ast.Constant) and str(start.value).startswith("-")
 
 
 @pytest.mark.parametrize("path", modules(), ids=relative)
@@ -151,10 +281,30 @@ def test_no_git_command_that_stages_commits_or_pushes(path: Path) -> None:
     """The tool never stages, commits or pushes (docs/SPEC.md security requirement 4; R4.6)."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
-        if isinstance(node, ast.List | ast.Tuple) and node.elts:
-            first = node.elts[0]
-            if isinstance(first, ast.Constant) and first.value in _FORBIDDEN_GIT_COMMANDS:
-                pytest.fail(f"{relative(path)} builds a git {first.value} command")
+        if isinstance(node, ast.List | ast.Tuple):
+            command = _git_subcommand(node)
+            if command in _FORBIDDEN_GIT_COMMANDS:
+                pytest.fail(f"{relative(path)} builds a git {command} command")
+
+
+@pytest.mark.parametrize(
+    ("source", "command"),
+    [
+        ('["commit", "-m", "x"]', "commit"),
+        ('["-c", "core.hooksPath=/dev/null", "commit"]', "commit"),
+        ('[*HARDENING_CONFIG, "--literal-pathspecs", "push"]', "push"),
+        ('["--attr-source", tree, "add", "-A"]', "add"),
+        ('[f"--work-tree={tree}", "commit"]', "commit"),
+        ('[f"{name}", "commit"]', None),
+        ('["diff", "--cached", "--", "add"]', "diff"),
+        ('["--", "commit"]', None),
+        ("[program, 'commit']", None),
+    ],
+)
+def test_git_subcommand_detection(source: str, command: str | None) -> None:
+    node = ast.parse(source, mode="eval").body
+    assert isinstance(node, ast.List)
+    assert _git_subcommand(node) == command
 
 
 # Where the user's own git configuration lives (aliases, pager, diff drivers...). Only the

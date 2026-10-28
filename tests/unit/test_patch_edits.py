@@ -69,6 +69,13 @@ def test_added_lines_use_the_new_line_numbers() -> None:
     assert added_lines(ORIGINAL, patched) == [(2, "x = 0"), (4, "c = 9")]
 
 
+def test_a_last_line_that_only_gains_its_newline_is_not_added() -> None:
+    original = "a = 1\nb = 2\nc = 3"
+    patched = apply_edits(original, [edit(1, 1, "a = 0\n")], "m.py")
+    assert patched.endswith("c = 3\n")
+    assert added_lines(original, patched) == [(1, "a = 0")]
+
+
 @pytest.mark.parametrize(
     "original",
     ["a = 1\nb = 2\nc = 3\n", "a = 1\nb = 2\nc = 3"],

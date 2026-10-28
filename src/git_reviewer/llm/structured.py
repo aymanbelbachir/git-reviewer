@@ -2,7 +2,9 @@
 
 The model gets no tools. It is asked for JSON matching a schema (Ollama's constrained decoding),
 and its raw answer is then validated by our own code with `strict=True` and `extra="forbid"`.
-Invalid output is an error: it is never repaired, re-parsed leniently or retried.
+Invalid output is an error: it is never repaired, re-parsed leniently or retried here. Only the
+fix loop asks again, as its next attempt (at most three in all), and validates that new answer the
+same way.
 """
 
 from __future__ import annotations
@@ -10,7 +12,7 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Callable
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -77,7 +79,9 @@ class GuardianOutput(BaseModel):
     model_config = _STRICT
 
     verdict: Literal["ok", "suspect", "block"]
-    reasons: list[str] = Field(max_length=10)
+    # Each reason is cut to 300 characters before display (guardians.base). The schema bound is
+    # looser, so that a wordy but otherwise valid answer is not a failure, which would block.
+    reasons: list[Annotated[str, Field(max_length=1_000)]] = Field(max_length=10)
     lines: list[GuardianLineRef] = Field(max_length=50)
 
 

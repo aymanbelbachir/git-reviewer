@@ -18,6 +18,8 @@ _IDENTIFIER = re.compile(r"[A-Za-z0-9_.:-]{1,64}")
 
 
 def event(name: str, **fields: object) -> None:
+    if not _IDENTIFIER.fullmatch(name):
+        raise ValueError("audit event names must be short identifiers")
     unknown = set(fields) - _ALLOWED_FIELDS
     if unknown:
         raise ValueError(f"audit fields not allowlisted: {sorted(unknown)}")
