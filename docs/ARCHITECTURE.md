@@ -415,8 +415,9 @@ docker --host unix://<validated socket> run
   reviewed").
 
 ## 9. Configuration
-- Sources, highest first: CLI flags, `GIT_REVIEWER_*` environment variables, the user config file
-  (`~/.config/git-reviewer/config.toml`). **No configuration is read from the reviewed repository**
+- Sources, highest first: `GIT_REVIEWER_*` environment variables, then the user config file
+  (`~/.config/git-reviewer/config.toml`). No CLI option sets a setting; only
+  `scripts/eval_guardians.py --model` passes an override. **No configuration is read from the reviewed repository**
   in v1: a malicious branch could otherwise point `ollama_url` at a remote host or loosen limits (T-27).
 - Keys: `ollama_url`, `reviewer_model`, `guardian_model` (separate from the reviewer, as the spec
   requires), `model_context_tokens` and `guardian_context_tokens` (each one's context window,

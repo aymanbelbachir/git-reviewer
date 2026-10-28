@@ -1,6 +1,7 @@
 """Settings (docs/ARCHITECTURE.md §9; SECURITY.md T-27).
 
-Sources, highest first: CLI flags, `GIT_REVIEWER_*` environment variables, the user config file
+Sources, highest first: `overrides` from the caller (only scripts/eval_guardians.py passes any; no
+CLI option sets a setting), `GIT_REVIEWER_*` environment variables, the user config file
 `$XDG_CONFIG_HOME/git-reviewer/config.toml` (default `~/.config/...`). Nothing is ever read from the
 reviewed repository: a malicious branch could otherwise point `ollama_url` at a remote host or
 loosen limits. Every security limit has a hard upper bound here.
